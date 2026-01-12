@@ -26,6 +26,7 @@ Current implementation notes:
 - From this point forward, UI work should prefer Tailwind utilities for new changes.
 - Branding updated to Bro File Manager.
 - Deployment docs added for Docker and PM2.
+- README includes featured image (brofm.jpg).
 
 ## P0 - Easy auth + read-only baseline (function first)
 - [x] Authentication: local admin password
