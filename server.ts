@@ -49,6 +49,12 @@ const MAX_PREVIEW_BYTES = 200 * 1024;
 const SEARCH_MAX_BYTES_RAW = process.env.SEARCH_MAX_BYTES?.trim();
 const SEARCH_MAX_BYTES = Number.parseInt(SEARCH_MAX_BYTES_RAW ?? "", 10);
 const MAX_SEARCH_BYTES = Number.isNaN(SEARCH_MAX_BYTES) ? MAX_PREVIEW_BYTES : SEARCH_MAX_BYTES;
+const ARCHIVE_LARGE_MB_RAW = process.env.ARCHIVE_LARGE_MB?.trim();
+const ARCHIVE_LARGE_MB = Number.parseInt(ARCHIVE_LARGE_MB_RAW ?? "", 10);
+const ARCHIVE_LARGE_BYTES =
+  Number.isFinite(ARCHIVE_LARGE_MB) && ARCHIVE_LARGE_MB > 0
+    ? ARCHIVE_LARGE_MB * 1024 * 1024
+    : 100 * 1024 * 1024;
 const AUDIT_LOG_PATH = process.env.AUDIT_LOG_PATH?.trim() ?? path.join(process.cwd(), "audit.log");
 const SESSION_COOKIE_OPTIONS = {
   httpOnly: true,
@@ -783,7 +789,22 @@ app.get("/api/archive", async (c) => {
     return c.json({ error: "No paths provided." }, 400);
   }
 
+  const formatParam = url.searchParams.get("format");
+  const formatRaw = formatParam ? formatParam.toLowerCase() : "zip";
+  const format =
+    formatRaw === "zip"
+      ? "zip"
+      : formatRaw === "targz" || formatRaw === "tar.gz" || formatRaw === "tgz"
+        ? "targz"
+        : null;
+  if (!format) {
+    return c.json({ error: "Invalid archive format." }, 400);
+  }
+
   const resolved: string[] = [];
+  const resolvedFullPaths: string[] = [];
+  const isSingle = requested.length === 1;
+  let singleName: string | null = null;
   const archiveRoot = session.rootReal;
   for (const item of requested) {
     let resolvedItem;
@@ -798,18 +819,36 @@ app.get("/api/archive", async (c) => {
     }
 
     resolved.push(path.relative(archiveRoot, resolvedItem.fullPath));
+    resolvedFullPaths.push(resolvedItem.fullPath);
+    if (isSingle) {
+      singleName = path.basename(resolvedItem.fullPath);
+    }
   }
 
   if (resolved.length === 0) {
     return c.json({ error: "No valid paths provided." }, 400);
   }
 
-  const archiveName = `bundle-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.tar.gz`;
+  const totalBytes =
+    format === "zip"
+      ? await getArchiveTotalBytes(resolvedFullPaths, ARCHIVE_LARGE_BYTES)
+      : 0;
+  const useStore = format === "zip" && totalBytes >= ARCHIVE_LARGE_BYTES;
+  const compression = format === "zip" ? (useStore ? "store" : "normal") : "gzip";
+
+  const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  const baseName = singleName ?? `bundle-${timestamp}`;
+  const safeBaseName = baseName.replace(/[\r\n"]/g, "") || "bundle";
+  const archiveName = format === "zip" ? `${safeBaseName}.zip` : `${safeBaseName}.tar.gz`;
 
   let process;
   try {
+    const cmd =
+      format === "zip"
+        ? ["zip", "-q", "-r", "-y", ...(useStore ? ["-0"] : []), "-", ...resolved]
+        : ["tar", "-czf", "-", ...resolved];
     process = Bun.spawn({
-      cmd: ["tar", "-czf", "-", ...resolved],
+      cmd,
       cwd: archiveRoot,
       stdout: "pipe",
       stderr: "pipe",
@@ -827,9 +866,9 @@ app.get("/api/archive", async (c) => {
     }
   });
 
-  c.header("Content-Type", "application/gzip");
+  c.header("Content-Type", format === "zip" ? "application/zip" : "application/gzip");
   c.header("Content-Disposition", `attachment; filename="${archiveName}"`);
-  await auditLog(c, "archive", { paths: requested, username: session.user });
+  await auditLog(c, "archive", { paths: requested, format, compression, username: session.user });
   return c.body(process.stdout);
 });
 
@@ -1149,6 +1188,62 @@ async function pathExists(target: string) {
   } catch {
     return false;
   }
+}
+
+async function getArchiveTotalBytes(paths: string[], limit: number) {
+  if (limit <= 0) {
+    return 0;
+  }
+  let total = 0;
+  for (const item of paths) {
+    if (total >= limit) {
+      break;
+    }
+    total += await sumPathBytes(item, limit - total);
+  }
+  return total;
+}
+
+async function sumPathBytes(root: string, limit: number) {
+  if (limit <= 0) {
+    return 0;
+  }
+  const stack = [root];
+  let total = 0;
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) {
+      continue;
+    }
+    let stats;
+    try {
+      stats = await fs.lstat(current);
+    } catch {
+      continue;
+    }
+    if (stats.isSymbolicLink()) {
+      continue;
+    }
+    if (stats.isFile()) {
+      total += stats.size;
+    } else if (stats.isDirectory()) {
+      try {
+        const dirents = await fs.readdir(current, { withFileTypes: true });
+        for (const dirent of dirents) {
+          if (dirent.isSymbolicLink()) {
+            continue;
+          }
+          stack.push(path.join(current, dirent.name));
+        }
+      } catch {
+        continue;
+      }
+    }
+    if (total >= limit) {
+      break;
+    }
+  }
+  return total;
 }
 
 async function resolveDestinationPath(target: string, rootReal: string) {

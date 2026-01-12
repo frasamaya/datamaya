@@ -13,7 +13,7 @@ Current implementation notes:
 - Symlinks are skipped to prevent escaping the root path.
 - Preview is text-only and capped at 200 KB.
 - Uploads use multipart form data and may buffer large files in memory.
-- Batch download uses the system `tar` binary to stream `.tar.gz` archives.
+- Archive downloads stream `.zip` by default via system `zip` (download link in Actions; `format=targz` for `.tar.gz` via `tar`); totals >= 100 MB switch to store mode (configurable via `ARCHIVE_LARGE_MB`).
 - Deleted items move into a hidden `/.trash` folder; restore requires the original parent path to exist.
 - Local users can be scoped to a subfolder of `FILE_ROOT` for per-share access.
 - Audit events are written as JSON lines to `./audit.log` by default.

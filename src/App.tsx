@@ -591,18 +591,25 @@ export default function App() {
     pushToast(`Moved ${selectionTargets.length} item(s) to trash.`, "success");
   }, [path, selectionTargets, refreshView, requireWrite, notifyError, pushToast]);
 
-  const handleArchive = useCallback(() => {
+  const archiveHref = useMemo(() => {
     if (selectionTargets.length === 0) {
-      notifyError("Select items to archive.");
-      return;
+      return null;
     }
     const params = new URLSearchParams();
     for (const entry of selectionTargets) {
       params.append("path", joinPath(path, entry.name));
     }
-    window.location.href = `${API_BASE}/archive?${params.toString()}`;
-    pushToast("Archive download started.", "info");
-  }, [path, selectionTargets, notifyError, pushToast]);
+    params.set("format", "zip");
+    return `${API_BASE}/archive?${params.toString()}`;
+  }, [path, selectionTargets]);
+
+  const handleArchiveClick = useCallback(() => {
+    if (selectionTargets.length === 0) {
+      notifyError("Select items to zip.");
+      return;
+    }
+    pushToast("Zip download started.", "info");
+  }, [selectionTargets, notifyError, pushToast]);
 
   const handleRestore = useCallback(
     async (item: TrashItem) => {
@@ -943,11 +950,12 @@ export default function App() {
                 canTextPreview={canTextPreview}
                 canImagePreview={canImagePreview}
                 downloadHref={downloadHref}
+                archiveHref={archiveHref}
                 onCopy={handleCopy}
                 onPaste={handlePaste}
                 onRename={handleRename}
                 onMove={handleMove}
-                onArchive={handleArchive}
+                onArchiveClick={handleArchiveClick}
                 onDelete={handleDelete}
                 onPreview={handlePreview}
                 onImagePreview={handleImagePreview}

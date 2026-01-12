@@ -459,6 +459,14 @@ select:disabled {
   box-shadow: 0 10px 20px rgba(28, 37, 43, 0.1);
 }
 
+.ghost.is-disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  pointer-events: none;
+  transform: none;
+  box-shadow: none;
+}
+
 button.filters-toggle {
   padding: 6px;
   width: 36px;

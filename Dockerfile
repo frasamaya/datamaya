@@ -10,6 +10,7 @@ RUN bun run build
 FROM oven/bun:1.2.23 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+RUN apt-get update && apt-get install -y zip && rm -rf /var/lib/apt/lists/*
 COPY package.json bun.lock ./
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist

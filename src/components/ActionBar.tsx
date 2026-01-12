@@ -9,6 +9,7 @@ import {
   Pencil,
   Trash2,
 } from "lucide-react";
+import type { MouseEvent } from "react";
 import type { Entry } from "../types";
 
 type ActionBarProps = {
@@ -23,11 +24,12 @@ type ActionBarProps = {
   canTextPreview: boolean;
   canImagePreview: boolean;
   downloadHref: string | null;
+  archiveHref: string | null;
   onCopy: () => void;
   onPaste: () => void;
   onRename: () => void;
   onMove: () => void;
-  onArchive: () => void;
+  onArchiveClick: () => void;
   onDelete: () => void;
   onPreview: () => void;
   onImagePreview: () => void;
@@ -45,11 +47,12 @@ export function ActionBar({
   canTextPreview,
   canImagePreview,
   downloadHref,
+  archiveHref,
   onCopy,
   onPaste,
   onRename,
   onMove,
-  onArchive,
+  onArchiveClick,
   onDelete,
   onPreview,
   onImagePreview,
@@ -59,6 +62,14 @@ export function ActionBar({
     strokeWidth: 1.8,
     "aria-hidden": true,
   } as const;
+  const archiveDisabled = actionLoading || showTrash || selectionCount === 0 || !archiveHref;
+  const handleArchiveClick = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (archiveDisabled) {
+      event.preventDefault();
+      return;
+    }
+    onArchiveClick();
+  };
 
   return (
     <div className="card action-bar">
@@ -102,14 +113,16 @@ export function ActionBar({
           <MoveRight {...iconProps} />
           Move
         </button>
-        <button
-          className="ghost"
-          onClick={onArchive}
-          disabled={actionLoading || showTrash || selectionCount === 0}
+        <a
+          className={`ghost${archiveDisabled ? " is-disabled" : ""}`}
+          href={archiveHref ?? "#"}
+          onClick={handleArchiveClick}
+          aria-disabled={archiveDisabled}
+          tabIndex={archiveDisabled ? -1 : undefined}
         >
           <Archive {...iconProps} />
-          Archive
-        </button>
+          Download Zip
+        </a>
         <button
           className="danger"
           onClick={onDelete}

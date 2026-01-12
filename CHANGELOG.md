@@ -5,7 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
-- None.
+### Added
+- Zip archive downloads for selected files/folders (archive endpoint supports `format=zip` or `format=targz`).
+- Archive action now provides a direct download link.
+- Large zip archives switch to store mode at/above 100 MB (`ARCHIVE_LARGE_MB`).
 
 ## [0.1.0] - 2026-01-12
 ### Added

@@ -31,6 +31,7 @@ ADMIN_PASSWORD=change-me           # legacy single-user mode
 FILE_ROOT=.                        # optional, defaults to process cwd
 SESSION_SECRET=change-me           # optional but recommended
 PORT=3033                          # optional
+ARCHIVE_LARGE_MB=100               # optional, zip switches to store mode at/above this size
 ```
 
 Tip: avoid trailing spaces or hidden characters in `.env` values.
@@ -121,7 +122,7 @@ See `CHANGELOG.md` for release notes.
 ## Notes
 - Symbolic links are skipped to avoid path escapes.
 - Preview returns plain text only and is capped at 200 KB.
-- Batch download uses the system `tar` binary to stream `.tar.gz` files.
+- Archive downloads stream `.zip` by default via system `zip` (use `format=targz` for `.tar.gz` via `tar`).
 - Deletes move items into `/.trash`; restore requires the original parent path to exist.
 - Audit logs are written to `./audit.log` by default (override with `AUDIT_LOG_PATH`).
 
