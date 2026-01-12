@@ -112,6 +112,12 @@ pm2 save
 
 Tip: run `pm2 startup` to auto-start on boot (follow the printed instructions).
 
+## Versioning
+This project follows SemVer. The current version is tracked in `package.json`.
+
+## Changelog
+See `CHANGELOG.md` for release notes.
+
 ## Notes
 - Symbolic links are skipped to avoid path escapes.
 - Preview returns plain text only and is capped at 200 KB.

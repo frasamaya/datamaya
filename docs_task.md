@@ -27,6 +27,7 @@ Current implementation notes:
 - Branding updated to Bro File Manager.
 - Deployment docs added for Docker and PM2.
 - README includes featured image (brofm.jpg).
+- Changelog and versioning docs added.
 
 ## P0 - Easy auth + read-only baseline (function first)
 - [x] Authentication: local admin password
