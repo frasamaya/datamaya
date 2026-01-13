@@ -1,5 +1,4 @@
 import { ChevronDown, ChevronUp } from "lucide-react";
-import type { DragEvent } from "react";
 import type { Entry, SortMode, TrashItem } from "../types";
 import { formatBytes, formatDate } from "../utils/format";
 import { FileIcon, FolderIcon } from "./icons";
@@ -23,9 +22,6 @@ type FileListProps = {
   onToggleSelect: (entry: Entry) => void;
   onEntryClick: (entry: Entry) => void;
   onRestore: (item: TrashItem) => void;
-  onDragOver: (event: DragEvent<HTMLDivElement>) => void;
-  onDragLeave: () => void;
-  onDrop: (event: DragEvent<HTMLDivElement>) => void;
 };
 
 export function FileList({
@@ -46,9 +42,6 @@ export function FileList({
   onToggleSelect,
   onEntryClick,
   onRestore,
-  onDragOver,
-  onDragLeave,
-  onDrop,
 }: FileListProps) {
   const sortState = {
     name: sortMode === "name-asc" ? "asc" : sortMode === "name-desc" ? "desc" : null,
@@ -78,12 +71,7 @@ export function FileList({
   };
 
   return (
-    <div
-      className={`card list ${dragActive ? "dragging" : ""}`}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
-    >
+    <div className={`card list ${dragActive ? "dragging" : ""}`}>
       {pagination && showPaginationTop ? <Pagination {...pagination} compact /> : null}
       {showTrash ? (
         <>

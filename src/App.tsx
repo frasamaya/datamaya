@@ -82,6 +82,7 @@ export default function App() {
   const [imagePreviewName, setImagePreviewName] = useState<string | null>(null);
   const [textPreviewOpen, setTextPreviewOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const dragDepth = useRef(0);
 
   const [theme, setTheme] = useTheme();
   const { toasts, pushToast } = useToasts();
@@ -319,8 +320,8 @@ export default function App() {
     return entries.filter((entry) => selectedNames.includes(entry.name));
   }, [entries, selectedNames]);
 
-  const selectionTargets = selectedEntries.length > 0 ? selectedEntries : selected ? [selected] : [];
-  const selectionCount = selectionTargets.length;
+  const selectionTargets = selectedEntries;
+  const selectionCount = selectedEntries.length;
   const canWrite = userRole !== "read-only";
 
   const requireWrite = useCallback(() => {
@@ -645,19 +646,37 @@ export default function App() {
     }
   }, [showTrash, loadPath, loadTrash, path]);
 
+  const handleDragEnter = useCallback(
+    (event: DragEvent<HTMLDivElement>) => {
+      if (showTrash || !canWrite) {
+        return;
+      }
+      event.preventDefault();
+      dragDepth.current += 1;
+      setDragActive(true);
+    },
+    [showTrash, canWrite]
+  );
+
   const handleDragOver = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
       if (showTrash || !canWrite) {
         return;
       }
       event.preventDefault();
-      setDragActive(true);
     },
     [showTrash, canWrite]
   );
 
   const handleDragLeave = useCallback(() => {
-    setDragActive(false);
+    if (dragDepth.current === 0) {
+      return;
+    }
+    dragDepth.current -= 1;
+    if (dragDepth.current <= 0) {
+      dragDepth.current = 0;
+      setDragActive(false);
+    }
   }, []);
 
   const handleDrop = useCallback(
@@ -666,6 +685,7 @@ export default function App() {
         return;
       }
       event.preventDefault();
+      dragDepth.current = 0;
       setDragActive(false);
       const files = Array.from(event.dataTransfer.files);
       await uploadFiles(files);
@@ -855,7 +875,13 @@ export default function App() {
   }, [auth, loadPath]);
 
   return (
-    <div className="app">
+    <div
+      className="app"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <Toasts toasts={toasts} />
       <ImagePreviewModal
         path={imagePreviewPath}
@@ -922,6 +948,7 @@ export default function App() {
               onMove={handleMove}
               onArchiveClick={handleArchiveClick}
               onDelete={handleDelete}
+              onClearSelection={handleClearSelection}
             />
 
             <div className=" py-2 px-1 flex items-center">
@@ -973,9 +1000,6 @@ export default function App() {
               onToggleSelect={toggleSelect}
               onEntryClick={handleEntryClick}
               onRestore={handleRestore}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
             />
           </div>
         )}

@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
 import type { ChangeEvent, MouseEvent, RefObject } from "react";
 
@@ -36,6 +37,7 @@ type ToolbarProps = {
   onMove: () => void;
   onArchiveClick: () => void;
   onDelete: () => void;
+  onClearSelection: () => void;
 };
 
 export function Toolbar({
@@ -62,6 +64,7 @@ export function Toolbar({
   onMove,
   onArchiveClick,
   onDelete,
+  onClearSelection,
 }: ToolbarProps) {
   const iconProps = {
     size: 16,
@@ -105,6 +108,10 @@ export function Toolbar({
         </button>
         {hasSelection ? (
           <>
+            <button className="ghost" onClick={onClearSelection} disabled={actionLoading}>
+              <X {...iconProps} />
+              Deselect
+            </button>
             <button
               className="ghost"
               onClick={onCopy}
