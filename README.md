@@ -1,4 +1,4 @@
-![Bro File Manager](brofm.jpg)
+![Bro File Manager](public/brofm.jpg)
 
 # Bro File Manager
 
