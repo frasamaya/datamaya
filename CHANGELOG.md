@@ -6,6 +6,20 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-01-21
+### Added
+- Share links with a dedicated shared-file view and inline previews for images, text/CSV, audio/video, and PDF.
+- Persisted share link storage with de-duplication on load/save.
+- Landing page redesign with animated hero, particle background, and marketing sections.
+- Register mode in the login form and `/login` route, with landing CTA deep-linking to registration.
+- Mobile sidebar drawer with burger toggle and overlay.
+### Changed
+- Shared file view now supports fullscreen layout and right-aligned download/meta placement.
+- Sidebar auto-closes on menu selection in mobile view.
+- Favicon updated to `logo.png`.
+### Fixed
+- Prevent detail panel from opening on single-tap selection in mobile view.
+
 ## [0.2.2] - 2026-01-20
 ### Added
 - List/grid view toggle with thumbnail cards for files and folders.

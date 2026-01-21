@@ -52,7 +52,7 @@ export function Header({
         {/* <p className="eyebrow">{BRAND_EYEBROW}</p> */}
         <div className="brand-title">
           <img className="brand-logo" src="/logo.png" alt={`${BRAND_TITLE} logo`} />
-          {/* <h1>{BRAND_TITLE}</h1> */}
+          <h1>{BRAND_TITLE}</h1>
         </div>
         {/* <p className="subtitle">{BRAND_SUBTITLE}</p> */}
         {/* {auth === "authed" ? (
