@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import { Header } from "./components/Header";
+import { DetailPanel } from "./components/DetailPanel";
 import { EditorModal } from "./components/EditorModal";
 import { ImagePreviewModal } from "./components/ImagePreviewModal";
 import { LoginForm } from "./components/LoginForm";
@@ -43,6 +44,7 @@ import type {
   ListResponse,
   Preview,
   SortMode,
+  StorageStats,
   TrashItem,
   TrashResponse,
   TypeFilter,
@@ -50,7 +52,9 @@ import type {
   ViewMode,
 } from "./types";
 import { parseSizeInput } from "./utils/filters";
+import { formatBytes } from "./utils/format";
 import {
+  getFileCategory,
   isImagePreviewable,
   isTextEditableName,
   isTextPreviewableName,
@@ -108,6 +112,45 @@ function setStoredViewMode(value: ViewMode) {
   } catch {}
 }
 
+function createUploadId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function uploadChunkWithProgress(
+  form: FormData,
+  totalSize: number,
+  onProgress: (value: { loaded: number; total: number; percent: number } | null) => void
+) {
+  return await new Promise<Response>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE}/upload/chunk`);
+    xhr.withCredentials = true;
+
+    xhr.upload.onprogress = (event) => {
+      const total = event.total || totalSize || 0;
+      const loaded = event.loaded || 0;
+      const percent = total > 0 ? Math.round((loaded / total) * 100) : 0;
+      onProgress({ loaded, total, percent });
+    };
+
+    xhr.onload = () => {
+      onProgress(null);
+      const response = new Response(xhr.responseText, { status: xhr.status });
+      resolve(response);
+    };
+
+    xhr.onerror = () => {
+      onProgress(null);
+      reject(new Error("Upload failed."));
+    };
+
+    xhr.send(form);
+  });
+}
+
 export default function App() {
   const [auth, setAuth] = useState<AuthState>("unknown");
   const [path, setPath] = useState("/");
@@ -142,15 +185,37 @@ export default function App() {
   const [dateFilter, setDateFilter] = useState<DateFilter>("any");
   const [sortMode, setSortMode] = useState<SortMode>("default");
   const [contentSearch, setContentSearch] = useState(false);
-  const [filtersOpen, setFiltersOpen] = useState(true);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [imagePreviewPath, setImagePreviewPath] = useState<string | null>(null);
   const [imagePreviewName, setImagePreviewName] = useState<string | null>(null);
   const [textPreviewOpen, setTextPreviewOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(() => getStoredViewMode());
+  const [storageStats, setStorageStats] = useState<StorageStats | null>(null);
+  const [uploadJobs, setUploadJobs] = useState<
+    Array<{
+      id: string;
+      name: string;
+      loaded: number;
+      total: number;
+      percent: number;
+      status: "uploading" | "done" | "error";
+    }>
+  >([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const dragDepth = useRef(0);
+  const storageStatsRef = useRef<StorageStats | null>(null);
+  const menuMetricsRef = useRef<{
+    all: { count: number; bytes: number };
+    recent: { count: number; bytes: number };
+    docs: { count: number; bytes: number };
+    photos: { count: number; bytes: number };
+    audio: { count: number; bytes: number };
+    video: { count: number; bytes: number };
+    archive: { count: number; bytes: number };
+    trash: { count: number; bytes: number };
+  } | null>(null);
 
   const [theme, setTheme] = useTheme();
   const { toasts, pushToast } = useToasts();
@@ -352,17 +417,61 @@ export default function App() {
         setTextPreviewOpen(false);
         setImagePreviewPath(null);
         setImagePreviewName(null);
-        if (isTextEditableName(entry.name)) {
-          void openEditorByPath(joinPath(path, entry.name), entry.name);
-          return;
-        }
-        if (isImagePreviewable(entry.name)) {
-          setImagePreviewPath(joinPath(path, entry.name));
-          setImagePreviewName(entry.name);
-        }
       }
     },
-    [path, loadPath, openEditorByPath]
+    [path, loadPath]
+  );
+
+  const openPreviewForEntry = useCallback(
+    async (entry: Entry) => {
+      if (entry.type !== "file") {
+        return;
+      }
+      if (isImagePreviewable(entry.name)) {
+        setImagePreviewPath(joinPath(path, entry.name));
+        setImagePreviewName(entry.name);
+        return;
+      }
+      if (!isTextPreviewableName(entry.name)) {
+        notifyError("Preview not available for this file type.");
+        return;
+      }
+
+      setPreviewLoading(true);
+      setError(null);
+
+      const response = await apiFetch(
+        `/preview?path=${encodeURIComponent(joinPath(path, entry.name))}`
+      );
+
+      if (!response.ok) {
+        const data = await readJson(response);
+        notifyError(data?.error ?? "Preview failed.");
+        setPreviewLoading(false);
+        return;
+      }
+
+      const data = (await response.json()) as Preview;
+      setPreview(data);
+      setTextPreviewOpen(true);
+      setPreviewLoading(false);
+    },
+    [path, notifyError]
+  );
+
+  const handleEntryDoubleClick = useCallback(
+    (entry: Entry) => {
+      if (entry.type !== "file") {
+        return;
+      }
+      setSelected(entry);
+      setPreview(null);
+      setTextPreviewOpen(false);
+      setImagePreviewPath(null);
+      setImagePreviewName(null);
+      void openPreviewForEntry(entry);
+    },
+    [openPreviewForEntry]
   );
 
   const handlePreview = useCallback(async () => {
@@ -552,39 +661,220 @@ export default function App() {
       setActionLoading(true);
       setError(null);
 
-      const form = new FormData();
-      form.set("path", path);
-      if (overwrite) {
-        form.set("overwrite", "1");
-      }
+      const startJob = (file: File) => {
+        const id = createUploadId();
+        setUploadJobs((prev) => [
+          ...prev,
+          {
+            id,
+            name: file.name,
+            loaded: 0,
+            total: file.size,
+            percent: 0,
+            status: "uploading",
+          },
+        ]);
+        return id;
+      };
+
+      const updateJob = (
+        id: string,
+        progress: { loaded: number; total: number; percent: number }
+      ) => {
+        setUploadJobs((prev) =>
+          prev.map((job) => (job.id === id ? { ...job, ...progress } : job))
+        );
+      };
+
+      const finalizeJob = (id: string, status: "done" | "error") => {
+        setUploadJobs((prev) =>
+          prev.map((job) =>
+            job.id === id ? { ...job, status, percent: status === "done" ? 100 : job.percent } : job
+          )
+        );
+        window.setTimeout(() => {
+          setUploadJobs((prev) => prev.filter((job) => job.id !== id));
+        }, status === "done" ? 1500 : 4000);
+      };
+
+      const CHUNK_SIZE = 5 * 1024 * 1024;
+      const MAX_CONCURRENCY = 5;
+      let uploadedAny = false;
+
       for (const file of files) {
-        form.append("files", file, file.name);
-      }
+        const id = startJob(file);
+        const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
 
-      const response = await apiFetch("/upload", {
-        method: "POST",
-        body: form,
-      });
-
-      if (response.status === 409 && !overwrite) {
-        const data = await readJson(response);
-        setActionLoading(false);
-        if (window.confirm(`${data?.error ?? "File exists."} Overwrite?`)) {
-          await uploadFiles(files, true);
+        let initResponse: Response;
+        try {
+          initResponse = await apiFetch("/upload/init", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              path,
+              name: file.name,
+              size: file.size,
+              totalChunks,
+              overwrite,
+            }),
+          });
+        } catch {
+          finalizeJob(id, "error");
+          notifyError(`Upload failed for ${file.name}.`);
+          continue;
         }
-        return;
+
+        if (initResponse.status === 409 && !overwrite) {
+          const data = await readJson(initResponse);
+          finalizeJob(id, "error");
+          if (window.confirm(`${data?.error ?? "File exists."} Overwrite?`)) {
+            await uploadFiles([file], true);
+          }
+          continue;
+        }
+
+        if (!initResponse.ok) {
+          const data = await readJson(initResponse);
+          finalizeJob(id, "error");
+          notifyError(data?.error ?? `Upload failed for ${file.name}.`);
+          continue;
+        }
+
+        const initData = (await initResponse.json()) as { uploadId: string; key?: string };
+        const statusParams = new URLSearchParams({ uploadId: initData.uploadId });
+        if (initData.key) {
+          statusParams.set("key", initData.key);
+        }
+        let uploadedParts: number[] = [];
+        try {
+          const statusResponse = await apiFetch(`/upload/status?${statusParams.toString()}`);
+          if (statusResponse.ok) {
+            const data = (await statusResponse.json()) as { uploadedParts?: number[] };
+            uploadedParts = data.uploadedParts ?? [];
+          }
+        } catch {}
+
+        const uploadedSet = new Set(uploadedParts);
+        const getPartSize = (part: number) => {
+          const start = (part - 1) * CHUNK_SIZE;
+          return Math.min(CHUNK_SIZE, Math.max(0, file.size - start));
+        };
+        let uploadedBytes = uploadedParts.reduce((sum, part) => sum + getPartSize(part), 0);
+        updateJob(id, {
+          loaded: uploadedBytes,
+          total: file.size,
+          percent: file.size > 0 ? Math.round((uploadedBytes / file.size) * 100) : 0,
+        });
+
+        let failed = false;
+        const inflight = new Map<number, number>();
+        const updateAggregatedProgress = () => {
+          let inflightLoaded = 0;
+          for (const value of inflight.values()) {
+            inflightLoaded += value;
+          }
+          const loaded = Math.min(file.size, uploadedBytes + inflightLoaded);
+          updateJob(id, {
+            loaded,
+            total: file.size,
+            percent: file.size > 0 ? Math.round((loaded / file.size) * 100) : 0,
+          });
+        };
+
+        const partsToUpload: number[] = [];
+        for (let part = 1; part <= totalChunks; part += 1) {
+          if (!uploadedSet.has(part)) {
+            partsToUpload.push(part);
+          }
+        }
+
+        const uploadPart = async (part: number) => {
+          const start = (part - 1) * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, file.size);
+          const chunk = file.slice(start, end);
+          const form = new FormData();
+          form.set("uploadId", initData.uploadId);
+          form.set("partNumber", String(part));
+          form.set("totalChunks", String(totalChunks));
+          if (initData.key) {
+            form.set("key", initData.key);
+          }
+          form.append("chunk", chunk, file.name);
+
+          inflight.set(part, 0);
+          updateAggregatedProgress();
+          try {
+            const chunkResponse = await uploadChunkWithProgress(form, chunk.size, (progress) => {
+              if (!progress) {
+                return;
+              }
+              inflight.set(part, progress.loaded);
+              updateAggregatedProgress();
+            });
+            inflight.delete(part);
+            if (!chunkResponse.ok) {
+              throw new Error("Chunk failed");
+            }
+            uploadedBytes += chunk.size;
+            updateAggregatedProgress();
+          } catch {
+            inflight.delete(part);
+            updateAggregatedProgress();
+            throw new Error("Chunk failed");
+          }
+        };
+
+        let cursor = 0;
+        const worker = async () => {
+          while (cursor < partsToUpload.length && !failed) {
+            const part = partsToUpload[cursor];
+            cursor += 1;
+            try {
+              await uploadPart(part);
+            } catch {
+              failed = true;
+            }
+          }
+        };
+
+        await Promise.allSettled(
+          Array.from({ length: Math.min(MAX_CONCURRENCY, partsToUpload.length) }, () => worker())
+        );
+
+        if (failed) {
+          finalizeJob(id, "error");
+          notifyError(`Upload failed for ${file.name}.`);
+          continue;
+        }
+
+        const completeResponse = await apiFetch("/upload/complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            uploadId: initData.uploadId,
+            key: initData.key,
+            totalChunks,
+          }),
+        });
+
+        if (!completeResponse.ok) {
+          const data = await readJson(completeResponse);
+          finalizeJob(id, "error");
+          notifyError(data?.error ?? `Upload failed for ${file.name}.`);
+          continue;
+        }
+
+        finalizeJob(id, "done");
+        uploadedAny = true;
       }
 
-      if (!response.ok) {
-        const data = await readJson(response);
-        notifyError(data?.error ?? "Upload failed.");
-        setActionLoading(false);
-        return;
+      if (uploadedAny) {
+        await refreshView();
       }
-
-      await refreshView();
       setActionLoading(false);
-      pushToast(`Uploaded ${files.length} file(s).`, "success");
+      if (uploadedAny) {
+        pushToast(`Uploaded ${files.length} file(s).`, "success");
+      }
     },
     [path, refreshView, canWrite, notifyError, pushToast]
   );
@@ -898,6 +1188,216 @@ export default function App() {
     resetContentSearch();
   }, [resetContentSearch]);
 
+  const exitTrashView = useCallback(() => {
+    if (showTrash) {
+      void loadPath(path);
+    }
+  }, [showTrash, loadPath, path]);
+
+  const handleSidebarAll = useCallback(() => {
+    exitTrashView();
+    setTypeFilter("all");
+    setDateFilter("any");
+    setQuery("");
+    void loadPath("/");
+  }, [exitTrashView, loadPath]);
+
+  const handleSidebarRecent = useCallback(() => {
+    exitTrashView();
+    setTypeFilter("all");
+    setDateFilter("7d");
+  }, [exitTrashView]);
+
+  const handleSidebarDocs = useCallback(() => {
+    exitTrashView();
+    setTypeFilter("document");
+  }, [exitTrashView]);
+
+  const handleSidebarPhotos = useCallback(() => {
+    exitTrashView();
+    setTypeFilter("image");
+  }, [exitTrashView]);
+
+  const handleSidebarAudio = useCallback(() => {
+    exitTrashView();
+    setTypeFilter("audio");
+  }, [exitTrashView]);
+
+  const handleSidebarVideo = useCallback(() => {
+    exitTrashView();
+    setTypeFilter("video");
+  }, [exitTrashView]);
+
+  const handleSidebarArchive = useCallback(() => {
+    exitTrashView();
+    setTypeFilter("archive");
+  }, [exitTrashView]);
+
+  const canTextPreview = useMemo(() => {
+    return Boolean(selected && selected.type === "file" && isTextPreviewableName(selected.name));
+  }, [selected]);
+
+  const canImagePreview = useMemo(() => {
+    return Boolean(selected && selected.type === "file" && isImagePreviewable(selected.name));
+  }, [selected]);
+
+  const storageOverview = useMemo(() => {
+    const buckets = {
+      image: { label: "Images", bytes: 0, count: 0 },
+      document: { label: "Documents", bytes: 0, count: 0 },
+      media: { label: "Media Files", bytes: 0, count: 0 },
+      archive: { label: "Archives", bytes: 0, count: 0 },
+      other: { label: "Other Files", bytes: 0, count: 0 },
+    };
+    let totalBytes = 0;
+    let totalFiles = 0;
+
+    for (const entry of entries) {
+      if (entry.type !== "file") {
+        continue;
+      }
+      totalBytes += entry.size;
+      totalFiles += 1;
+
+      const category = getFileCategory(entry.name);
+      if (category === "image") {
+        buckets.image.bytes += entry.size;
+        buckets.image.count += 1;
+      } else if (category === "document") {
+        buckets.document.bytes += entry.size;
+        buckets.document.count += 1;
+      } else if (category === "audio" || category === "video") {
+        buckets.media.bytes += entry.size;
+        buckets.media.count += 1;
+      } else if (category === "archive") {
+        buckets.archive.bytes += entry.size;
+        buckets.archive.count += 1;
+      } else {
+        buckets.other.bytes += entry.size;
+        buckets.other.count += 1;
+      }
+    }
+
+    return {
+      totalBytes,
+      totalFiles,
+      items: [
+        { key: "image", ...buckets.image },
+        { key: "document", ...buckets.document },
+        { key: "media", ...buckets.media },
+        { key: "archive", ...buckets.archive },
+        { key: "other", ...buckets.other },
+      ],
+    };
+  }, [entries]);
+
+  const menuMetrics = useMemo(() => {
+    const recentCutoff = Date.now() - (DATE_RANGE_MS["7d"] ?? 0);
+    let recentBytes = 0;
+    let recentCount = 0;
+    let audioBytes = 0;
+    let audioCount = 0;
+    let videoBytes = 0;
+    let videoCount = 0;
+    let archiveBytes = 0;
+    let archiveCount = 0;
+    for (const entry of entries) {
+      if (entry.type !== "file") {
+        continue;
+      }
+      if (entry.mtime >= recentCutoff) {
+        recentBytes += entry.size;
+        recentCount += 1;
+      }
+      const category = getFileCategory(entry.name);
+      if (category === "audio") {
+        audioBytes += entry.size;
+        audioCount += 1;
+      } else if (category === "video") {
+        videoBytes += entry.size;
+        videoCount += 1;
+      } else if (category === "archive") {
+        archiveBytes += entry.size;
+        archiveCount += 1;
+      }
+    }
+
+    const docs = storageOverview.items.find((item) => item.key === "document");
+    const images = storageOverview.items.find((item) => item.key === "image");
+    const trashBytes = trashItems.reduce((sum, item) => sum + (item.size ?? 0), 0);
+
+    return {
+      all: {
+        count: storageStats?.totalFiles ?? storageOverview.totalFiles,
+        bytes: storageStats?.totalBytes ?? storageOverview.totalBytes,
+      },
+      recent: { count: recentCount, bytes: recentBytes },
+      docs: { count: docs?.count ?? 0, bytes: docs?.bytes ?? 0 },
+      photos: { count: images?.count ?? 0, bytes: images?.bytes ?? 0 },
+      audio: { count: audioCount, bytes: audioBytes },
+      video: { count: videoCount, bytes: videoBytes },
+      archive: { count: archiveCount, bytes: archiveBytes },
+      trash: { count: trashItems.length, bytes: trashBytes },
+    };
+  }, [entries, storageOverview, trashItems, storageStats]);
+
+  const storageFallback = storageStats ?? storageStatsRef.current;
+  const storageTotalBytes = storageFallback?.totalBytes ?? storageOverview.totalBytes;
+  const storageTotalFiles = storageFallback?.totalFiles ?? storageOverview.totalFiles;
+  const showDetailPanel = Boolean(selected && selected.type === "file" && !showTrash);
+
+  useEffect(() => {
+    const hasData =
+      menuMetrics.all.count > 0 ||
+      menuMetrics.all.bytes > 0 ||
+      menuMetrics.docs.count > 0 ||
+      menuMetrics.docs.bytes > 0 ||
+      menuMetrics.photos.count > 0 ||
+      menuMetrics.photos.bytes > 0 ||
+      menuMetrics.audio.count > 0 ||
+      menuMetrics.audio.bytes > 0 ||
+      menuMetrics.video.count > 0 ||
+      menuMetrics.video.bytes > 0 ||
+      menuMetrics.archive.count > 0 ||
+      menuMetrics.archive.bytes > 0 ||
+      menuMetrics.recent.count > 0 ||
+      menuMetrics.recent.bytes > 0 ||
+      menuMetrics.trash.count > 0 ||
+      menuMetrics.trash.bytes > 0;
+    if (hasData) {
+      menuMetricsRef.current = menuMetrics;
+    }
+  }, [menuMetrics]);
+
+  const displayedMenuMetrics = useMemo(() => {
+    const totalBytes =
+      menuMetrics.all.bytes +
+      menuMetrics.docs.bytes +
+      menuMetrics.photos.bytes +
+      menuMetrics.audio.bytes +
+      menuMetrics.video.bytes +
+      menuMetrics.archive.bytes +
+      menuMetrics.recent.bytes +
+      menuMetrics.trash.bytes;
+    if (totalBytes === 0 && menuMetricsRef.current) {
+      return menuMetricsRef.current;
+    }
+    return menuMetrics;
+  }, [menuMetrics]);
+
+  useEffect(() => {
+    if (storageStats) {
+      storageStatsRef.current = storageStats;
+      return;
+    }
+    if (!storageStatsRef.current && storageOverview.totalBytes > 0) {
+      storageStatsRef.current = {
+        totalBytes: storageOverview.totalBytes,
+        totalFiles: storageOverview.totalFiles,
+      };
+    }
+  }, [storageStats, storageOverview]);
+
   const filtered = useMemo(() => {
     const trimmed = query.trim().toLowerCase();
     const hasQuery = trimmed.length > 0;
@@ -1107,6 +1607,32 @@ export default function App() {
     setStoredViewMode(viewMode);
   }, [viewMode]);
 
+  useEffect(() => {
+    if (auth !== "authed") {
+      return;
+    }
+    let active = true;
+    const fetchStats = async () => {
+      const response = await apiFetch("/storage");
+      if (response.status === 401) {
+        setAuth("logged_out");
+        return;
+      }
+      if (!response.ok) {
+        return;
+      }
+      const data = (await response.json()) as StorageStats;
+      if (active) {
+        setStorageStats(data);
+        storageStatsRef.current = data;
+      }
+    };
+    void fetchStats();
+    return () => {
+      active = false;
+    };
+  }, [auth]);
+
   return (
     <div
       className="app"
@@ -1116,6 +1642,33 @@ export default function App() {
       onDrop={handleDrop}
     >
       <Toasts toasts={toasts} />
+      {uploadJobs.length > 0 ? (
+        <div className="upload-popups">
+          {uploadJobs.map((job) => (
+            <div key={job.id} className={`upload-popup ${job.status}`}>
+              <div className="upload-popup-head">
+                <span className="upload-popup-name">{job.name}</span>
+                <span className="upload-popup-percent">{job.percent}%</span>
+              </div>
+              <div className="upload-popup-bar">
+                <div className="upload-popup-fill" style={{ width: `${job.percent}%` }} />
+              </div>
+              <div className="upload-popup-meta">
+                <span>
+                  {formatBytes(job.loaded)} / {formatBytes(job.total || job.loaded)}
+                </span>
+                <span className="upload-popup-status">
+                  {job.status === "uploading"
+                    ? "Uploading"
+                    : job.status === "done"
+                      ? "Completed"
+                      : "Failed"}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <EditorModal
         open={editorOpen}
         file={editorFile}
@@ -1136,124 +1689,325 @@ export default function App() {
       />
       <TextPreviewModal preview={preview} open={textPreviewOpen} onClose={closeTextPreview} />
       <div className="shell">
-        <Header
-          auth={auth}
-          username={username}
-          userRole={userRole}
-          theme={theme}
-          showTrash={showTrash}
-          filtersOpen={filtersOpen}
-          filtersActive={filtersActive}
-          typeFilter={typeFilter}
-          sizeMinMb={sizeMinMb}
-          sizeMaxMb={sizeMaxMb}
-          dateFilter={dateFilter}
-          onThemeChange={setTheme}
-          onLogout={handleLogout}
-          onToggleFilters={() => setFiltersOpen((prev) => !prev)}
-          onTypeFilterChange={setTypeFilter}
-          onSizeMinChange={setSizeMinMb}
-          onSizeMaxChange={setSizeMaxMb}
-          onDateFilterChange={setDateFilter}
-          onClearFilters={handleClearFilters}
-        />
-
         {auth === "logged_out" ? (
-          <LoginForm
-            loginUsername={loginUsername}
-            password={password}
-            error={error}
-            onUsernameChange={setLoginUsername}
-            onPasswordChange={setPassword}
-            onSubmit={handleLogin}
-          />
-        ) : (
-          <div className="stack">
-            <Toolbar
-              query={query}
-              currentPathLabel={currentPathLabel}
-              onQueryChange={setQuery}
-              onUp={() => parent && loadPath(parent)}
-              onRefresh={() => loadPath(path)}
-              onUploadClick={handleUploadClick}
-              onCreateFolder={handleCreateFolder}
-              onToggleTrash={handleToggleTrash}
+          <>
+            <Header
+              auth={auth}
+              username={username}
+              userRole={userRole}
+              theme={theme}
               showTrash={showTrash}
-              viewMode={viewMode}
-              onViewModeChange={setViewMode}
-              showEdit={canEditTarget}
-              editDisabled={editDisabled}
-              editLoading={editorLoading}
-              onEdit={handleOpenEditor}
-              actionLoading={actionLoading}
-              canWrite={canWrite}
-              selectionCount={selectionCount}
-              clipboardCount={clipboard?.length ?? 0}
-              archiveHref={archiveHref}
-              parent={parent}
-              fileInputRef={fileInputRef}
-              onUploadChange={handleUploadChange}
-              onCopy={handleCopy}
-              onPaste={handlePaste}
-              onRename={handleRename}
-              onMove={handleMove}
-              onArchiveClick={handleArchiveClick}
-              onDelete={handleDelete}
-              onClearSelection={handleClearSelection}
+              filtersOpen={filtersOpen}
+              filtersActive={filtersActive}
+              typeFilter={typeFilter}
+              sizeMinMb={sizeMinMb}
+              sizeMaxMb={sizeMaxMb}
+              dateFilter={dateFilter}
+              onThemeChange={setTheme}
+              onLogout={handleLogout}
+              onToggleFilters={() => setFiltersOpen((prev) => !prev)}
+              onTypeFilterChange={setTypeFilter}
+              onSizeMinChange={setSizeMinMb}
+              onSizeMaxChange={setSizeMaxMb}
+              onDateFilterChange={setDateFilter}
+              onClearFilters={handleClearFilters}
             />
+            <LoginForm
+              loginUsername={loginUsername}
+              password={password}
+              error={error}
+              onUsernameChange={setLoginUsername}
+              onPasswordChange={setPassword}
+              onSubmit={handleLogin}
+            />
+          </>
+        ) : (
+          <div className={`workspace${showDetailPanel ? " has-detail" : ""}`}>
+            <aside className="sidebar">
+              {/* <div className="sidebar-card">
+                <div className="workspace-pill">
+                  <span className="workspace-avatar">
+                    {(username || "W").slice(0, 1).toUpperCase()}
+                  </span>
+                  <div>
+                    <p className="workspace-name">{username || "Workspace"}</p>
+                    <p className="workspace-meta">{userRole}</p>
+                  </div>
+                </div>
+              </div> */}
 
-            <div className=" py-2 px-1 flex items-center">
-              <div className="breadcrumbs">
+              <Header
+                auth={auth}
+                username={username}
+                userRole={userRole}
+                theme={theme}
+                showTrash={showTrash}
+                filtersOpen={filtersOpen}
+                filtersActive={filtersActive}
+                typeFilter={typeFilter}
+                sizeMinMb={sizeMinMb}
+                sizeMaxMb={sizeMaxMb}
+                dateFilter={dateFilter}
+                onThemeChange={setTheme}
+                onLogout={handleLogout}
+                onToggleFilters={() => setFiltersOpen((prev) => !prev)}
+                onTypeFilterChange={setTypeFilter}
+                onSizeMinChange={setSizeMinMb}
+                onSizeMaxChange={setSizeMaxMb}
+                onDateFilterChange={setDateFilter}
+                onClearFilters={handleClearFilters}
+              />
+              {/* <div className="sidebar-section">
+                <p className="sidebar-label">General</p>
+                <button type="button" className="nav-button" onClick={handleSidebarAll}>
+                  Overview
+                </button>
+                <button type="button" className="nav-button is-muted" disabled>
+                  Settings
+                </button>
+              </div> */}
+
+              <div className="sidebar-section">
+                <p className="sidebar-label">Main menu</p>
                 <button
                   type="button"
-                  className="crumb crumb-home"
-                  onClick={() => loadPath("/")}
-                  aria-label="Back to Home"
+                  className={`menu-row${
+                    !showTrash && typeFilter === "all" && dateFilter === "any" ? " is-active" : ""
+                  }`}
+                  onClick={handleSidebarAll}
                 >
-                  <Home size={16} strokeWidth={1.8} aria-hidden="true" />
+                  <div className="menu-icon all">all</div>
+                  <div className="menu-info">
+                    <p>All files</p>
+                    <span>{storageTotalFiles} files</span>
+                  </div>
+                  <span className="menu-size">{formatBytes(displayedMenuMetrics.all.bytes)}</span>
                 </button>
-                {breadcrumbs.map((crumb, index) => (
-                  <button
-                    key={crumb.path}
-                    type="button"
-                    className="crumb"
-                    onClick={() => loadPath(crumb.path)}
-                  >
-                    {crumb.label}
-                    {index < breadcrumbs.length - 1 ? <span>/</span> : null}
-                  </button>
-                ))}
+                <button
+                  type="button"
+                  className={`menu-row${dateFilter === "7d" ? " is-active" : ""}`}
+                  onClick={handleSidebarRecent}
+                >
+                  <div className="menu-icon recent">new</div>
+                  <div className="menu-info">
+                    <p>Recent</p>
+                    <span>{displayedMenuMetrics.recent.count} files</span>
+                  </div>
+                  <span className="menu-size">
+                    {formatBytes(displayedMenuMetrics.recent.bytes)}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`menu-row${typeFilter === "document" ? " is-active" : ""}`}
+                  onClick={handleSidebarDocs}
+                >
+                  <div className="menu-icon docs">doc</div>
+                  <div className="menu-info">
+                    <p>Docs</p>
+                    <span>{displayedMenuMetrics.docs.count} files</span>
+                  </div>
+                  <span className="menu-size">{formatBytes(displayedMenuMetrics.docs.bytes)}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`menu-row${typeFilter === "image" ? " is-active" : ""}`}
+                  onClick={handleSidebarPhotos}
+                >
+                  <div className="menu-icon photos">img</div>
+                  <div className="menu-info">
+                    <p>Photos</p>
+                    <span>{displayedMenuMetrics.photos.count} files</span>
+                  </div>
+                  <span className="menu-size">
+                    {formatBytes(displayedMenuMetrics.photos.bytes)}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`menu-row${typeFilter === "audio" ? " is-active" : ""}`}
+                  onClick={handleSidebarAudio}
+                >
+                  <div className="menu-icon audio">aud</div>
+                  <div className="menu-info">
+                    <p>Audio</p>
+                    <span>{displayedMenuMetrics.audio.count} files</span>
+                  </div>
+                  <span className="menu-size">{formatBytes(displayedMenuMetrics.audio.bytes)}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`menu-row${typeFilter === "video" ? " is-active" : ""}`}
+                  onClick={handleSidebarVideo}
+                >
+                  <div className="menu-icon video">vid</div>
+                  <div className="menu-info">
+                    <p>Video</p>
+                    <span>{displayedMenuMetrics.video.count} files</span>
+                  </div>
+                  <span className="menu-size">{formatBytes(displayedMenuMetrics.video.bytes)}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`menu-row${typeFilter === "archive" ? " is-active" : ""}`}
+                  onClick={handleSidebarArchive}
+                >
+                  <div className="menu-icon archive">zip</div>
+                  <div className="menu-info">
+                    <p>Archives</p>
+                    <span>{displayedMenuMetrics.archive.count} files</span>
+                  </div>
+                  <span className="menu-size">
+                    {formatBytes(displayedMenuMetrics.archive.bytes)}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`menu-row${showTrash ? " is-active" : ""}`}
+                  onClick={handleToggleTrash}
+                >
+                  <div className="menu-icon trash">bin</div>
+                  <div className="menu-info">
+                    <p>Trash</p>
+                    <span>{displayedMenuMetrics.trash.count} files</span>
+                  </div>
+                  <span className="menu-size">{formatBytes(displayedMenuMetrics.trash.bytes)}</span>
+                </button>
               </div>
-            </div>
 
-            <FileList
-              showTrash={showTrash}
-              loading={loading}
-              trashItems={pagedTrashItems}
-              filtered={pagedEntries}
-              path={path}
-              viewMode={viewMode}
-              selectedNames={selectedNames}
-              allSelected={allSelected}
-              dragActive={dragActive}
-              actionLoading={actionLoading}
-              canWrite={canWrite}
-              sortMode={sortMode}
-              onSortModeChange={setSortMode}
-              pagination={{
-                page,
-                pageSize,
-                totalItems,
-                pageSizeOptions: PAGE_SIZE_OPTIONS,
-                onPageChange: handlePageChange,
-                onPageSizeChange: handlePageSizeChange,
-              }}
-              showPaginationTop
-              onToggleSelectAll={toggleSelectAll}
-              onToggleSelect={toggleSelect}
-              onEntryClick={handleEntryClick}
-              onRestore={handleRestore}
-            />
+              <div className="sidebar-footer">
+                <div className="storage-summary">
+                  <div className="storage-header">
+                    <div>
+                      <p className="storage-used">{formatBytes(storageTotalBytes)}</p>
+                      <p className="storage-subtitle">Used</p>
+                    </div>
+                    <div className="storage-capacity">
+                      <p>1024 GB</p>
+                      <button type="button" className="storage-upgrade">
+                        Upgrade
+                      </button>
+                    </div>
+                  </div>
+                  <div className="storage-bar">
+                    <div
+                      className="storage-bar-fill"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          (storageTotalBytes / (1024 * 1024 ** 3)) * 100
+                        ).toFixed(1)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </aside>
+
+            <main className="main">
+
+              <div className="stack">
+                <Toolbar
+                  query={query}
+                  currentPathLabel={currentPathLabel}
+                  onQueryChange={setQuery}
+                  onUp={() => parent && loadPath(parent)}
+                  onRefresh={() => loadPath(path)}
+                  onUploadClick={handleUploadClick}
+                  onCreateFolder={handleCreateFolder}
+                  onToggleTrash={handleToggleTrash}
+                  showTrash={showTrash}
+                  viewMode={viewMode}
+                  onViewModeChange={setViewMode}
+                  showEdit={canEditTarget}
+                  editDisabled={editDisabled}
+                  editLoading={editorLoading}
+                  onEdit={handleOpenEditor}
+                  actionLoading={actionLoading}
+                  canWrite={canWrite}
+                  selectionCount={selectionCount}
+                  clipboardCount={clipboard?.length ?? 0}
+                  archiveHref={archiveHref}
+                  parent={parent}
+                  fileInputRef={fileInputRef}
+                  onUploadChange={handleUploadChange}
+                  onCopy={handleCopy}
+                  onPaste={handlePaste}
+                  onRename={handleRename}
+                  onMove={handleMove}
+                  onArchiveClick={handleArchiveClick}
+                  onDelete={handleDelete}
+                  onClearSelection={handleClearSelection}
+                />
+                <div className="breadcrumbs-bar">
+                  <div className="breadcrumbs">
+                    <button
+                      type="button"
+                      className="crumb crumb-home"
+                      onClick={() => loadPath("/")}
+                      aria-label="Back to Home"
+                    >
+                      <Home size={16} strokeWidth={1.8} aria-hidden="true" />
+                    </button>
+                    {breadcrumbs.map((crumb, index) => (
+                      <button
+                        key={crumb.path}
+                        type="button"
+                        className="crumb"
+                        onClick={() => loadPath(crumb.path)}
+                      >
+                        {crumb.label}
+                        {index < breadcrumbs.length - 1 ? <span>/</span> : null}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <FileList
+                  showTrash={showTrash}
+                  loading={loading}
+                  trashItems={pagedTrashItems}
+                  filtered={pagedEntries}
+                  path={path}
+                  viewMode={viewMode}
+                  selectedNames={selectedNames}
+                  activeName={selected?.name ?? null}
+                  allSelected={allSelected}
+                  dragActive={dragActive}
+                  actionLoading={actionLoading}
+                  canWrite={canWrite}
+                  sortMode={sortMode}
+                  onSortModeChange={setSortMode}
+                  pagination={{
+                    page,
+                    pageSize,
+                    totalItems,
+                    pageSizeOptions: PAGE_SIZE_OPTIONS,
+                    onPageChange: handlePageChange,
+                    onPageSizeChange: handlePageSizeChange,
+                  }}
+                  showPaginationTop
+                  onToggleSelectAll={toggleSelectAll}
+                  onToggleSelect={toggleSelect}
+                  onEntryClick={handleEntryClick}
+                  onEntryDoubleClick={handleEntryDoubleClick}
+                  onRestore={handleRestore}
+                />
+              </div>
+            </main>
+
+            {showDetailPanel ? (
+              <aside className="detail-panel">
+                <DetailPanel
+                  showTrash={showTrash}
+                  selected={selected}
+                  canTextPreview={canTextPreview}
+                  canImagePreview={canImagePreview}
+                  error={error}
+                  onClose={() => setSelected(null)}
+                />
+              </aside>
+            ) : null}
           </div>
         )}
       </div>

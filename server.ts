@@ -3,12 +3,16 @@ import { serveStatic } from "hono/bun";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import {
   CopyObjectCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectCommand,
+  CompleteMultipartUploadCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListPartsCommand,
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
+  UploadPartCommand,
 } from "@aws-sdk/client-s3";
 import { createHmac, randomUUID, scryptSync, timingSafeEqual } from "crypto";
 import { promises as fs } from "fs";
@@ -75,6 +79,7 @@ const ARCHIVE_LARGE_BYTES =
   Number.isFinite(ARCHIVE_LARGE_MB) && ARCHIVE_LARGE_MB > 0
     ? ARCHIVE_LARGE_MB * 1024 * 1024
     : 100 * 1024 * 1024;
+const UPLOAD_TMP_DIR = path.join(os.tmpdir(), "bro-fm-uploads");
 const AUDIT_LOG_PATH = process.env.AUDIT_LOG_PATH?.trim() ?? path.join(process.cwd(), "audit.log");
 const SESSION_COOKIE_BASE_OPTIONS = {
   httpOnly: true,
@@ -328,6 +333,15 @@ app.get("/api/list", async (c) => {
   }
 
   return c.json(response);
+});
+
+app.get("/api/storage", async (c) => {
+  const session = c.get("session");
+  if (STORAGE_MODE === "s3") {
+    return handleS3Storage(c, session);
+  }
+  const stats = await getLocalStorageStats(session.rootReal);
+  return c.json(stats);
 });
 
 app.get("/api/search", async (c) => {
@@ -721,6 +735,125 @@ app.post("/api/upload", async (c) => {
   });
 
   return c.json({ ok: true });
+});
+
+app.post("/api/upload/init", async (c) => {
+  const session = c.get("session");
+  if (!canWrite(session.role)) {
+    return c.json({ error: "Read-only account." }, 403);
+  }
+
+  const body = await readJsonBody<{
+    path?: string;
+    name?: string;
+    size?: number;
+    totalChunks?: number;
+    overwrite?: boolean;
+  }>(c);
+  if (!body?.path || !body.name || !Number.isFinite(body.size) || !body.totalChunks) {
+    return c.json({ error: "Invalid upload init payload." }, 400);
+  }
+
+  const sanitized = sanitizeName(body.name);
+  if (!sanitized) {
+    return c.json({ error: "Invalid file name." }, 400);
+  }
+
+  if (STORAGE_MODE === "s3") {
+    return handleS3UploadInit(c, session, {
+      path: body.path,
+      name: sanitized,
+      size: body.size,
+      totalChunks: body.totalChunks,
+      overwrite: Boolean(body.overwrite),
+    });
+  }
+
+  return handleLocalUploadInit(c, session, {
+    path: body.path,
+    name: sanitized,
+    size: body.size,
+    totalChunks: body.totalChunks,
+    overwrite: Boolean(body.overwrite),
+  });
+});
+
+app.get("/api/upload/status", async (c) => {
+  const session = c.get("session");
+  const uploadId = c.req.query("uploadId");
+  if (!uploadId) {
+    return c.json({ error: "Upload id is required." }, 400);
+  }
+
+  if (STORAGE_MODE === "s3") {
+    const key = c.req.query("key");
+    if (!key) {
+      return c.json({ error: "Key is required." }, 400);
+    }
+    return handleS3UploadStatus(c, session, uploadId, key);
+  }
+
+  return handleLocalUploadStatus(c, session, uploadId);
+});
+
+app.post("/api/upload/chunk", async (c) => {
+  const session = c.get("session");
+  if (!canWrite(session.role)) {
+    return c.json({ error: "Read-only account." }, 403);
+  }
+  const form = await c.req.formData();
+  const uploadId = form.get("uploadId");
+  const partRaw = form.get("partNumber");
+  const totalRaw = form.get("totalChunks");
+  const chunk = form.get("chunk");
+
+  if (typeof uploadId !== "string" || typeof partRaw !== "string" || typeof totalRaw !== "string") {
+    return c.json({ error: "Invalid upload chunk payload." }, 400);
+  }
+  if (!(chunk instanceof File)) {
+    return c.json({ error: "Chunk is required." }, 400);
+  }
+
+  const partNumber = Number.parseInt(partRaw, 10);
+  const totalChunks = Number.parseInt(totalRaw, 10);
+  if (!Number.isFinite(partNumber) || partNumber <= 0 || !Number.isFinite(totalChunks)) {
+    return c.json({ error: "Invalid chunk index." }, 400);
+  }
+
+  if (STORAGE_MODE === "s3") {
+    const key = form.get("key");
+    if (typeof key !== "string") {
+      return c.json({ error: "Key is required." }, 400);
+    }
+    return handleS3UploadChunk(c, session, { uploadId, key, partNumber, chunk });
+  }
+
+  return handleLocalUploadChunk(c, session, { uploadId, partNumber, totalChunks, chunk });
+});
+
+app.post("/api/upload/complete", async (c) => {
+  const session = c.get("session");
+  if (!canWrite(session.role)) {
+    return c.json({ error: "Read-only account." }, 403);
+  }
+
+  const body = await readJsonBody<{
+    uploadId?: string;
+    key?: string;
+    totalChunks?: number;
+  }>(c);
+  if (!body?.uploadId || !body.totalChunks) {
+    return c.json({ error: "Invalid upload completion payload." }, 400);
+  }
+
+  if (STORAGE_MODE === "s3") {
+    if (!body.key) {
+      return c.json({ error: "Key is required." }, 400);
+    }
+    return handleS3UploadComplete(c, session, body.uploadId, body.key, body.totalChunks);
+  }
+
+  return handleLocalUploadComplete(c, session, body.uploadId, body.totalChunks);
 });
 
 app.post("/api/move", async (c) => {
@@ -1455,6 +1588,48 @@ async function sumPathBytes(root: string, limit: number) {
     }
   }
   return total;
+}
+
+async function getLocalStorageStats(root: string) {
+  const stack = [root];
+  let totalBytes = 0;
+  let totalFiles = 0;
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) {
+      continue;
+    }
+    let stats;
+    try {
+      stats = await fs.lstat(current);
+    } catch {
+      continue;
+    }
+    if (stats.isSymbolicLink()) {
+      continue;
+    }
+    if (stats.isFile()) {
+      totalBytes += stats.size;
+      totalFiles += 1;
+      continue;
+    }
+    if (stats.isDirectory()) {
+      try {
+        const dirents = await fs.readdir(current, { withFileTypes: true });
+        for (const dirent of dirents) {
+          if (dirent.isSymbolicLink()) {
+            continue;
+          }
+          stack.push(path.join(current, dirent.name));
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return { totalBytes, totalFiles };
 }
 
 async function resolveDestinationPath(target: string, rootReal: string) {
@@ -2370,6 +2545,309 @@ async function handleS3Archive(c: AppContext, session: SessionContext) {
   }
 }
 
+async function handleLocalUploadInit(
+  c: AppContext,
+  session: SessionContext,
+  payload: {
+    path: string;
+    name: string;
+    size: number;
+    totalChunks: number;
+    overwrite: boolean;
+  }
+) {
+  let resolved;
+  try {
+    resolved = await resolveSafePath(payload.path, session.rootReal);
+  } catch {
+    return c.json({ error: "Path not found." }, 404);
+  }
+
+  const dirStat = await fs.stat(resolved.fullPath);
+  if (!dirStat.isDirectory()) {
+    return c.json({ error: "Path is not a directory." }, 400);
+  }
+
+  const destPath = path.join(resolved.fullPath, payload.name);
+  if (!isWithinRoot(destPath, session.rootReal)) {
+    return c.json({ error: "Invalid file path." }, 400);
+  }
+
+  if (!payload.overwrite && (await pathExists(destPath))) {
+    return c.json({ error: `File exists: ${payload.name}` }, 409);
+  }
+
+  const uploadId = randomUUID();
+  const dir = path.join(UPLOAD_TMP_DIR, uploadId);
+  await fs.mkdir(dir, { recursive: true });
+  const meta = {
+    uploadId,
+    path: resolved.normalized,
+    name: payload.name,
+    size: payload.size,
+    totalChunks: payload.totalChunks,
+    overwrite: payload.overwrite,
+  };
+  await fs.writeFile(path.join(dir, "meta.json"), JSON.stringify(meta));
+
+  await auditLog(c, "upload_init", {
+    path: resolved.normalized,
+    name: payload.name,
+    username: session.user,
+  });
+
+  return c.json({ uploadId });
+}
+
+async function handleLocalUploadStatus(c: AppContext, session: SessionContext, uploadId: string) {
+  const dir = path.join(UPLOAD_TMP_DIR, uploadId);
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return c.json({ error: "Upload not found." }, 404);
+  }
+  const uploadedParts = entries
+    .filter((name) => name.endsWith(".part"))
+    .map((name) => Number.parseInt(name.replace(/\.part$/, ""), 10))
+    .filter((value) => Number.isFinite(value));
+  return c.json({ uploadedParts });
+}
+
+async function handleLocalUploadChunk(
+  c: AppContext,
+  session: SessionContext,
+  payload: { uploadId: string; partNumber: number; totalChunks: number; chunk: File }
+) {
+  const dir = path.join(UPLOAD_TMP_DIR, payload.uploadId);
+  try {
+    await fs.stat(dir);
+  } catch {
+    return c.json({ error: "Upload not found." }, 404);
+  }
+
+  const chunkPath = path.join(dir, `${payload.partNumber}.part`);
+  await Bun.write(chunkPath, payload.chunk);
+  return c.json({ ok: true });
+}
+
+async function handleLocalUploadComplete(
+  c: AppContext,
+  session: SessionContext,
+  uploadId: string,
+  totalChunks: number
+) {
+  const dir = path.join(UPLOAD_TMP_DIR, uploadId);
+  let metaRaw: string;
+  try {
+    metaRaw = await fs.readFile(path.join(dir, "meta.json"), "utf8");
+  } catch {
+    return c.json({ error: "Upload not found." }, 404);
+  }
+
+  const meta = JSON.parse(metaRaw) as {
+    path: string;
+    name: string;
+    overwrite: boolean;
+  };
+
+  let resolved;
+  try {
+    resolved = await resolveSafePath(meta.path, session.rootReal);
+  } catch {
+    return c.json({ error: "Path not found." }, 404);
+  }
+
+  const destPath = path.join(resolved.fullPath, meta.name);
+  if (!isWithinRoot(destPath, session.rootReal)) {
+    return c.json({ error: "Invalid file path." }, 400);
+  }
+
+  if (!meta.overwrite && (await pathExists(destPath))) {
+    return c.json({ error: `File exists: ${meta.name}` }, 409);
+  }
+
+  const handle = await fs.open(destPath, "w");
+  try {
+    for (let part = 1; part <= totalChunks; part += 1) {
+      const chunkPath = path.join(dir, `${part}.part`);
+      const chunkData = await fs.readFile(chunkPath);
+      await handle.write(chunkData);
+    }
+  } catch (error) {
+    await handle.close();
+    return c.json({ error: "Failed to assemble upload." }, 500);
+  }
+  await handle.close();
+
+  await fs.rm(dir, { recursive: true, force: true });
+  await auditLog(c, "upload_complete", {
+    path: resolved.normalized,
+    name: meta.name,
+    username: session.user,
+  });
+
+  return c.json({ ok: true });
+}
+
+async function handleS3UploadInit(
+  c: AppContext,
+  session: SessionContext,
+  payload: {
+    path: string;
+    name: string;
+    size: number;
+    totalChunks: number;
+    overwrite: boolean;
+  }
+) {
+  let resolved;
+  try {
+    resolved = resolveSafeS3Path(payload.path, session.rootReal);
+  } catch {
+    return c.json({ error: "Path not found." }, 404);
+  }
+
+  const dirInfo = await getS3PathInfo(session.rootReal, resolved.normalized);
+  if (dirInfo.type === "none") {
+    return c.json({ error: "Path not found." }, 404);
+  }
+  if (dirInfo.type !== "dir") {
+    return c.json({ error: "Path is not a directory." }, 400);
+  }
+
+  const destPath =
+    resolved.normalized === "/" ? `/${payload.name}` : `${resolved.normalized}/${payload.name}`;
+  const key = toS3Key(session.rootReal, destPath);
+
+  if (!payload.overwrite) {
+    const prefix = toS3Prefix(session.rootReal, destPath);
+    if ((await s3ObjectExists(key)) || (await s3PrefixExists(prefix))) {
+      return c.json({ error: `File exists: ${payload.name}` }, 409);
+    }
+  }
+
+  const client = getS3Client();
+  const response = await client.send(
+    new CreateMultipartUploadCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+    })
+  );
+
+  if (!response.UploadId) {
+    return c.json({ error: "Failed to start upload." }, 500);
+  }
+
+  await auditLog(c, "upload_init", {
+    path: resolved.normalized,
+    name: payload.name,
+    username: session.user,
+    storage: "s3",
+  });
+
+  return c.json({ uploadId: response.UploadId, key });
+}
+
+async function handleS3UploadStatus(
+  c: AppContext,
+  session: SessionContext,
+  uploadId: string,
+  key: string
+) {
+  const client = getS3Client();
+  let response;
+  try {
+    response = await client.send(
+      new ListPartsCommand({
+        Bucket: S3_BUCKET,
+        Key: key,
+        UploadId: uploadId,
+      })
+    );
+  } catch (error) {
+    if (isS3NotFound(error)) {
+      return c.json({ error: "Upload not found." }, 404);
+    }
+    throw error;
+  }
+
+  const uploadedParts = (response.Parts ?? [])
+    .map((part) => part.PartNumber)
+    .filter((part): part is number => Number.isFinite(part));
+
+  return c.json({ uploadedParts });
+}
+
+async function handleS3UploadChunk(
+  c: AppContext,
+  session: SessionContext,
+  payload: { uploadId: string; key: string; partNumber: number; chunk: File }
+) {
+  const client = getS3Client();
+  const data = new Uint8Array(await payload.chunk.arrayBuffer());
+  await client.send(
+    new UploadPartCommand({
+      Bucket: S3_BUCKET,
+      Key: payload.key,
+      UploadId: payload.uploadId,
+      PartNumber: payload.partNumber,
+      Body: data,
+    })
+  );
+  return c.json({ ok: true });
+}
+
+async function handleS3UploadComplete(
+  c: AppContext,
+  session: SessionContext,
+  uploadId: string,
+  key: string,
+  totalChunks: number
+) {
+  const client = getS3Client();
+  const response = await client.send(
+    new ListPartsCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      UploadId: uploadId,
+    })
+  );
+  const parts = (response.Parts ?? [])
+    .filter((part) => part.ETag && part.PartNumber)
+    .map((part) => ({
+      ETag: part.ETag,
+      PartNumber: part.PartNumber as number,
+    }))
+    .sort((a, b) => a.PartNumber - b.PartNumber);
+
+  if (parts.length < totalChunks) {
+    return c.json({ error: "Upload incomplete." }, 409);
+  }
+
+  await client.send(
+    new CompleteMultipartUploadCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      UploadId: uploadId,
+      MultipartUpload: { Parts: parts },
+    })
+  );
+
+  await auditLog(c, "upload_complete", {
+    key,
+    username: session.user,
+    storage: "s3",
+  });
+
+  return c.json({ ok: true });
+}
+
+async function handleS3Storage(c: AppContext, session: SessionContext) {
+  const stats = await getS3StorageStats(session.rootReal);
+  return c.json(stats);
+}
+
 function resolveStorageMode(): StorageMode {
   const raw = (process.env.STORAGE_MODE ?? "").trim().toLowerCase();
   if (raw === "s3") {
@@ -2818,6 +3296,29 @@ async function s3GetArchiveTotalBytes(
     }
   }
   return total;
+}
+
+async function getS3StorageStats(rootPrefix: string) {
+  const trashPrefix = `${rootPrefix}.trash/`;
+  const objects = await listS3Objects(rootPrefix);
+  let totalBytes = 0;
+  let totalFiles = 0;
+
+  for (const object of objects) {
+    if (!object.key) {
+      continue;
+    }
+    if (object.key.endsWith("/")) {
+      continue;
+    }
+    if (trashPrefix && object.key.startsWith(trashPrefix)) {
+      continue;
+    }
+    totalBytes += object.size;
+    totalFiles += 1;
+  }
+
+  return { totalBytes, totalFiles };
 }
 
 async function s3DownloadToFile(key: string, destPath: string) {

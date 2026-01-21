@@ -1,10 +1,10 @@
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { Archive, ChevronDown, ChevronUp, File, FileText, Image, Music, Video } from "lucide-react";
 import type { Entry, SortMode, TrashItem, ViewMode } from "../types";
 import { formatBytes, formatDate } from "../utils/format";
-import { isImagePreviewable } from "../utils/fileTypes";
+import { getFileCategory, isImagePreviewable } from "../utils/fileTypes";
 import { joinPath } from "../utils/path";
 import { API_BASE } from "../constants";
-import { FileIcon, FolderIcon } from "./icons";
+import { FolderIcon } from "./icons";
 import { Pagination, type PaginationProps } from "./Pagination";
 
 type FileListProps = {
@@ -15,6 +15,7 @@ type FileListProps = {
   path: string;
   viewMode: ViewMode;
   selectedNames: string[];
+  activeName?: string | null;
   allSelected: boolean;
   dragActive: boolean;
   actionLoading: boolean;
@@ -26,6 +27,7 @@ type FileListProps = {
   onToggleSelectAll: () => void;
   onToggleSelect: (entry: Entry) => void;
   onEntryClick: (entry: Entry) => void;
+  onEntryDoubleClick: (entry: Entry) => void;
   onRestore: (item: TrashItem) => void;
 };
 
@@ -37,6 +39,7 @@ export function FileList({
   path,
   viewMode,
   selectedNames,
+  activeName,
   allSelected,
   dragActive,
   actionLoading,
@@ -48,9 +51,32 @@ export function FileList({
   onToggleSelectAll,
   onToggleSelect,
   onEntryClick,
+  onEntryDoubleClick,
   onRestore,
 }: FileListProps) {
   const isGridView = viewMode === "grid" && !showTrash;
+  const getEntryIcon = (entry: Entry | TrashItem) => {
+    if (entry.type === "dir") {
+      return { icon: <FolderIcon />, className: "dir" };
+    }
+    const category = getFileCategory(entry.name);
+    if (category === "image") {
+      return { icon: <Image aria-hidden="true" />, className: "image" };
+    }
+    if (category === "document") {
+      return { icon: <FileText aria-hidden="true" />, className: "document" };
+    }
+    if (category === "audio") {
+      return { icon: <Music aria-hidden="true" />, className: "audio" };
+    }
+    if (category === "video") {
+      return { icon: <Video aria-hidden="true" />, className: "video" };
+    }
+    if (category === "archive") {
+      return { icon: <Archive aria-hidden="true" />, className: "archive" };
+    }
+    return { icon: <File aria-hidden="true" />, className: "other" };
+  };
   const sortState = {
     name: sortMode === "name-asc" ? "asc" : sortMode === "name-desc" ? "desc" : null,
     size: sortMode === "size-asc" ? "asc" : sortMode === "size-desc" ? "desc" : null,
@@ -94,27 +120,30 @@ export function FileList({
           ) : trashItems.length === 0 ? (
             <div className="empty">Trash is empty.</div>
           ) : (
-            trashItems.map((item, index) => (
-              <div
-                key={item.id}
-                className="row trash"
-                style={{ animationDelay: `${index * 20}ms` }}
-              >
-                <div className="name">
-                  <span className="icon">{item.type === "dir" ? <FolderIcon /> : <FileIcon />}</span>
-                  {item.name}
-                </div>
-                <span className="muted">{item.originalPath}</span>
-                <span>{formatDate(item.deletedAt)}</span>
-                <button
-                  className="ghost"
-                  onClick={() => onRestore(item)}
-                  disabled={actionLoading || !canWrite}
+            trashItems.map((item, index) => {
+              const entryIcon = getEntryIcon(item);
+              return (
+                <div
+                  key={item.id}
+                  className="row trash"
+                  style={{ animationDelay: `${index * 20}ms` }}
                 >
-                  Restore
-                </button>
-              </div>
-            ))
+                  <div className="name">
+                    <span className={`icon ${entryIcon.className}`}>{entryIcon.icon}</span>
+                    {item.name}
+                  </div>
+                  <span className="muted">{item.originalPath}</span>
+                  <span>{formatDate(item.deletedAt)}</span>
+                  <button
+                    className="ghost"
+                    onClick={() => onRestore(item)}
+                    disabled={actionLoading || !canWrite}
+                  >
+                    Restore
+                  </button>
+                </div>
+              );
+            })
           )}
         </>
       ) : (
@@ -167,9 +196,10 @@ export function FileList({
           ) : isGridView ? (
             <div className="thumb-grid">
               {filtered.map((entry, index) => {
-                const isSelected = selectedNames.includes(entry.name);
+                const isSelected = selectedNames.includes(entry.name) || entry.name === activeName;
                 const entryPath = joinPath(path, entry.name);
                 const isImage = entry.type === "file" && isImagePreviewable(entry.name);
+                const entryIcon = getEntryIcon(entry);
                 return (
                   <div
                     key={`${entry.type}-${entry.name}`}
@@ -185,7 +215,11 @@ export function FileList({
                       />
                       <span className="thumb-type">{entry.type === "dir" ? "Folder" : "File"}</span>
                     </div>
-                    <button className="thumb-media" onClick={() => onEntryClick(entry)}>
+                    <button
+                      className="thumb-media"
+                      onClick={() => onEntryClick(entry)}
+                      onDoubleClick={() => onEntryDoubleClick(entry)}
+                    >
                       {isImage ? (
                         <img
                           src={`${API_BASE}/image?path=${encodeURIComponent(entryPath)}`}
@@ -193,12 +227,16 @@ export function FileList({
                           loading="lazy"
                         />
                       ) : (
-                        <span className="thumb-icon">
-                          {entry.type === "dir" ? <FolderIcon /> : <FileIcon />}
+                        <span className={`thumb-icon ${entryIcon.className}`}>
+                          {entryIcon.icon}
                         </span>
                       )}
                     </button>
-                    <button className="thumb-name" onClick={() => onEntryClick(entry)}>
+                    <button
+                      className="thumb-name"
+                      onClick={() => onEntryClick(entry)}
+                      onDoubleClick={() => onEntryDoubleClick(entry)}
+                    >
                       {entry.name}
                     </button>
                     <div className="thumb-meta">
@@ -210,29 +248,36 @@ export function FileList({
               })}
             </div>
           ) : (
-            filtered.map((entry, index) => (
-              <div
-                key={`${entry.type}-${entry.name}`}
-                className={`row ${entry.type} ${selectedNames.includes(entry.name) ? "selected" : ""}`}
-                style={{ animationDelay: `${index * 20}ms` }}
-              >
-                <span>
-                  <input
-                    type="checkbox"
-                    checked={selectedNames.includes(entry.name)}
-                    onChange={() => onToggleSelect(entry)}
-                  />
-                </span>
-                <button className="name" onClick={() => onEntryClick(entry)}>
-                  <span className="icon">
-                    {entry.type === "dir" ? <FolderIcon /> : <FileIcon />}
+            filtered.map((entry, index) => {
+              const entryIcon = getEntryIcon(entry);
+              return (
+                <div
+                  key={`${entry.type}-${entry.name}`}
+                  className={`row ${entry.type} ${
+                    selectedNames.includes(entry.name) || entry.name === activeName ? "selected" : ""
+                  }`}
+                  style={{ animationDelay: `${index * 20}ms` }}
+                >
+                  <span>
+                    <input
+                      type="checkbox"
+                      checked={selectedNames.includes(entry.name)}
+                      onChange={() => onToggleSelect(entry)}
+                    />
                   </span>
-                  {entry.name}
-                </button>
-                <span>{entry.type === "file" ? formatBytes(entry.size) : "--"}</span>
-                <span>{formatDate(entry.mtime)}</span>
-              </div>
-            ))
+                  <button
+                    className="name"
+                    onClick={() => onEntryClick(entry)}
+                    onDoubleClick={() => onEntryDoubleClick(entry)}
+                  >
+                    <span className={`icon ${entryIcon.className}`}>{entryIcon.icon}</span>
+                    {entry.name}
+                  </button>
+                  <span>{entry.type === "file" ? formatBytes(entry.size) : "--"}</span>
+                  <span>{formatDate(entry.mtime)}</span>
+                </div>
+              );
+            })
           )}
           {dragActive ? <div className="drop-overlay">Drop files to upload</div> : null}
         </>

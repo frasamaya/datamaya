@@ -1,3 +1,4 @@
+import { X } from "lucide-react";
 import type { Entry } from "../types";
 import { formatBytes, formatDate } from "../utils/format";
 
@@ -7,6 +8,7 @@ type DetailPanelProps = {
   canTextPreview: boolean;
   canImagePreview: boolean;
   error: string | null;
+  onClose?: () => void;
 };
 
 export function DetailPanel({
@@ -15,10 +17,18 @@ export function DetailPanel({
   canTextPreview,
   canImagePreview,
   error,
+  onClose,
 }: DetailPanelProps) {
   return (
     <div className="card detail">
-      <p className="label">Selection</p>
+      <div className="detail-header">
+        <p className="label">Selection</p>
+        {onClose ? (
+          <button className="ghost detail-close" onClick={onClose} aria-label="Close details">
+            <X size={16} strokeWidth={1.8} aria-hidden="true" />
+          </button>
+        ) : null}
+      </div>
       {showTrash ? (
         <div className="empty">Restore items from trash to bring them back.</div>
       ) : selected ? (

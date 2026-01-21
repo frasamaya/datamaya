@@ -55,6 +55,11 @@ export type TrashResponse = {
   role: UserRole;
 };
 
+export type StorageStats = {
+  totalBytes: number;
+  totalFiles: number;
+};
+
 export type ToastTone = "success" | "error" | "info";
 
 export type Toast = {
