@@ -7,6 +7,7 @@ import {
   FolderPlus,
   LayoutGrid,
   List as ListIcon,
+  Menu,
   MoveRight,
   Pencil,
   RefreshCw,
@@ -48,6 +49,7 @@ type ToolbarProps = {
   onArchiveClick: () => void;
   onDelete: () => void;
   onClearSelection: () => void;
+  onToggleSidebar: () => void;
 };
 
 export function Toolbar({
@@ -81,6 +83,7 @@ export function Toolbar({
   onArchiveClick,
   onDelete,
   onClearSelection,
+  onToggleSidebar,
 }: ToolbarProps) {
   const iconProps = {
     size: 16,
@@ -100,7 +103,7 @@ export function Toolbar({
   return (
     <div
       className={
-        hasSelection ? "toolbar card is-sticky shadow-sm shadow-sky-800" : "toolbar card "
+        hasSelection ? "toolbar card shadow-sm" : "toolbar card "
       }
     >
       <div>
@@ -108,6 +111,9 @@ export function Toolbar({
         <p className="meta">{currentPathLabel}</p>
       </div>
       <div className="toolbar-actions">
+        <button className="ghost sidebar-toggle" onClick={onToggleSidebar} aria-label="Open menu">
+          <Menu {...iconProps} />
+        </button>
         {!hasSelection ? (
           <input
             className="search"
@@ -191,7 +197,7 @@ export function Toolbar({
               <RefreshCw {...iconProps} />
               Refresh
             </button>
-            <button onClick={onUploadClick} disabled={actionLoading || showTrash || !canWrite}>
+            <button className="primary" onClick={onUploadClick} disabled={actionLoading || showTrash || !canWrite}>
               <Upload {...iconProps} />
               Upload
             </button>
@@ -213,12 +219,12 @@ export function Toolbar({
           <div className="view-toggle" role="group" aria-label="View mode">
             <button
               type="button"
-              className={`ghost${viewMode === "list" ? " is-active" : ""}`}
+              className={`ghost${viewMode === "list" ? " is-active primary" : ""}`}
               aria-pressed={viewMode === "list"}
               onClick={() => onViewModeChange("list")}
             >
               <ListIcon {...iconProps} />
-              List
+              
             </button>
             <button
               type="button"
@@ -227,7 +233,7 @@ export function Toolbar({
               onClick={() => onViewModeChange("grid")}
             >
               <LayoutGrid {...iconProps} />
-              Grid
+              
             </button>
           </div>
         ) : null}

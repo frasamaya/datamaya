@@ -8,6 +8,14 @@ type DetailPanelProps = {
   canTextPreview: boolean;
   canImagePreview: boolean;
   error: string | null;
+  share?: {
+    status: "idle" | "checking" | "creating" | "ready" | "error";
+    url: string | null;
+    error: string | null;
+  };
+  onShareCreate?: () => void;
+  onShareCopy?: () => void;
+  onShareOpen?: () => void;
   onClose?: () => void;
 };
 
@@ -17,8 +25,13 @@ export function DetailPanel({
   canTextPreview,
   canImagePreview,
   error,
+  share,
+  onShareCreate,
+  onShareCopy,
+  onShareOpen,
   onClose,
 }: DetailPanelProps) {
+  const showShare = Boolean(selected && selected.type === "file" && onShareCreate);
   return (
     <div className="card detail">
       <div className="detail-header">
@@ -46,6 +59,41 @@ export function DetailPanel({
                   ? "Use Image Preview in Actions to pop out the image."
                   : "Preview available for .txt, .php, .js, .html only."}
             </p>
+          ) : null}
+          {showShare ? (
+            <div className="detail-share">
+              <p className="label">Share</p>
+              <p className="meta">Create a link to open this file in shared view.</p>
+              <div className="share-actions">
+                <button
+                  className="primary"
+                  onClick={onShareCreate}
+                  disabled={share?.status === "creating" || share?.status === "checking"}
+                >
+                  {share?.status === "creating"
+                    ? "Creating..."
+                    : share?.status === "checking"
+                      ? "Checking..."
+                    : share?.url
+                      ? "Regenerate link"
+                      : "Create share link"}
+                </button>
+                {share?.url && onShareOpen ? (
+                  <button className="ghost" onClick={onShareOpen}>
+                    Open
+                  </button>
+                ) : null}
+              </div>
+              {share?.url ? (
+                <div className="share-link-row">
+                  <input className="share-link" type="text" readOnly value={share.url} />
+                  <button className="ghost" onClick={onShareCopy} disabled={!onShareCopy}>
+                    Copy
+                  </button>
+                </div>
+              ) : null}
+              {share?.error ? <p className="error">{share.error}</p> : null}
+            </div>
           ) : null}
         </div>
       ) : (

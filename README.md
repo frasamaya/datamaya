@@ -1,29 +1,38 @@
-Sponsored by [Jetorbit.com](https://jetorbit.com)
 
-![Bro File Manager](public/brofm.jpg)
+![datamaya](public/brofm.jpg)
 
-# Bro File Manager
+# datamaya
 
-👨🏻 Lightweight file manager built with Bun + Hono + React. It ships with cookie-based auth, safe path resolution, and a tidy UI for browsing server folders.
+> Forked from [Bro File Manager](https://github.com/jetorbit/bro-file-manager) and enhanced with S3 support, advanced user management, file sharing, and a refreshed UI.
+
+👨🏻 Modern file manager built with Bun + Hono + React. Now supports S3 storage, multi-user management, file sharing, and an updated, clean UI for browsing and managing files.
 
 ## Features
-- Read/write file operations (upload, download, create, rename, delete/restore, copy/paste).
-- Drag-and-drop upload across the app surface.
-- Batch downloads as zip or tar.gz, with large zips switching to store mode.
-- Search, filters, sorting, pagination, and a recent view for large directories.
-- Image preview popup and text preview (first 200 KB).
-- Grid/thumbnail view toggle for browsing files and folders.
-- Built-in code editor (Ace) for common web files with syntax highlighting, fullscreen, and new-tab editing.
-- Local users with roles and per-share roots; stateless signed session cookie.
-- Audit logging for file actions.
-- Safe path normalization with symlink avoidance to prevent traversal.
+- Read/write file operations (upload, download, create, rename, delete/restore, copy/paste)
+- Drag-and-drop upload across the app surface
+- Batch downloads as zip or tar.gz, with large zips switching to store mode
+- Search, filters, sorting, pagination, and a recent view for large directories
+- Image preview popup and text preview (first 200 KB)
+- Grid/thumbnail view toggle for browsing files and folders
+- Built-in code editor (Ace) for common web files with syntax highlighting, fullscreen, and new-tab editing
+- **S3 storage support** (optional, via config)
+- **Advanced user management** (multi-user, roles, per-user roots)
+- **File sharing** (generate shareable links)
+- **Refreshed UI** for a modern, clean experience
+- Audit logging for file actions
+- Safe path normalization with symlink avoidance to prevent traversal
 
 ## Recent improvements
-- Header logo and selection-aware toolbar with clear selection.
-- Restore the last visited folder on refresh.
-- Session cookies set `Secure` based on request scheme (supports HTTP in local Docker).
-- Docker Compose host mounts can be overridden via `HOST_DATA_PATH` and `HOST_LOGS_PATH`.
-- Added grid view thumbnails and an in-app editor for HTML/PHP/JS/CSS/JSON/Markdown.
+- Forked from Bro File Manager and renamed to **datamaya**
+- S3 storage support for scalable cloud file management
+- User management: roles, per-user roots, JSON config
+- File sharing: generate and manage shareable links
+- UI overhaul for a more modern and user-friendly experience
+- Header logo and selection-aware toolbar with clear selection
+- Restore the last visited folder on refresh
+- Session cookies set `Secure` based on request scheme (supports HTTP in local Docker)
+- Docker Compose host mounts can be overridden via `HOST_DATA_PATH` and `HOST_LOGS_PATH`
+- Added grid view thumbnails and an in-app editor for HTML/PHP/JS/CSS/JSON/Markdown
 
 ## Requirements
 - Bun >= 1.1
@@ -149,7 +158,7 @@ Tip: run `pm2 startup` to auto-start on boot (follow the printed instructions).
 This project follows SemVer. The current version is tracked in `package.json`.
 
 ## Changelog
-See `CHANGELOG.md` for release notes.
+See `CHANGELOG.md` for release notes and details on the fork and enhancements.
 
 ## Notes
 - Symbolic links are skipped to avoid path escapes.
@@ -159,5 +168,3 @@ See `CHANGELOG.md` for release notes.
 - Audit logs are written to `./audit.log` by default (override with `AUDIT_LOG_PATH`).
 
 Build with ❤️ from Jogja & Jetorbit
-
-Sponsored by [Jetorbit.com](https://jetorbit.com)

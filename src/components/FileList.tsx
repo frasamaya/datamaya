@@ -105,7 +105,7 @@ export function FileList({
   };
 
   return (
-    <div className={`card list ${dragActive ? "dragging" : ""}${isGridView ? " is-grid" : ""}`}>
+    <div className={`card list ${dragActive ? "dragging" : ""}${isGridView ? " is-grid" : ""}`} style={{border: 'none'}}>
       {pagination && showPaginationTop ? <Pagination {...pagination} compact /> : null}
       {showTrash ? (
         <>

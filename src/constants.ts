@@ -3,7 +3,7 @@ import { parseEnvBoolean } from "./utils/env";
 
 export const API_BASE = "/api";
 export const BRAND_EYEBROW = import.meta.env.VITE_BRAND_EYEBROW ?? "File Manager";
-export const BRAND_TITLE = import.meta.env.VITE_BRAND_TITLE ?? "Bro FM";
+export const BRAND_TITLE = import.meta.env.VITE_BRAND_TITLE ?? "Datamaya";
 export const BRAND_SUBTITLE =
   import.meta.env.VITE_BRAND_SUBTITLE ?? "Manage file in server easily 😌";
 export const SHORTCUTS_ENABLED = parseEnvBoolean(import.meta.env.VITE_SHORTCUTS_ENABLED, false);
@@ -42,7 +42,7 @@ export const FILE_TYPE_GROUPS = [
   { key: "archive", exts: [".zip", ".tar", ".gz", ".tgz", ".rar", ".7z", ".bz2", ".xz"] },
 ] as const;
 
-export const TEXT_PREVIEW_EXTS = new Set([".txt", ".php", ".js", ".html"]);
+export const TEXT_PREVIEW_EXTS = new Set([".txt", ".php", ".js", ".html", ".csv"]);
 export const TEXT_EDIT_EXTS = new Set([
   ".txt",
   ".php",

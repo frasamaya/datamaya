@@ -68,6 +68,15 @@ export type Toast = {
   tone: ToastTone;
 };
 
+export type SharedFile = {
+  token: string;
+  name: string;
+  size: number;
+  mtime: number;
+  canTextPreview: boolean;
+  canImagePreview: boolean;
+};
+
 export type TypeFilter =
   | "all"
   | "dir"

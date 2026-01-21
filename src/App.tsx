@@ -14,8 +14,10 @@ import { Header } from "./components/Header";
 import { DetailPanel } from "./components/DetailPanel";
 import { EditorModal } from "./components/EditorModal";
 import { ImagePreviewModal } from "./components/ImagePreviewModal";
+import { LandingPage } from "./components/LandingPage";
 import { LoginForm } from "./components/LoginForm";
 import { FileList } from "./components/FileList";
+import { SharedFileView } from "./components/SharedFileView";
 import { TextPreviewModal } from "./components/TextPreviewModal";
 import { Toasts } from "./components/Toasts";
 import { Toolbar } from "./components/Toolbar";
@@ -216,6 +218,26 @@ export default function App() {
     archive: { count: number; bytes: number };
     trash: { count: number; bytes: number };
   } | null>(null);
+
+  const shareToken = useMemo(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    const match = window.location.pathname.match(/^\/share\/([^/]+)\/?$/);
+    return match ? match[1] : null;
+  }, []);
+  const [shareLinks, setShareLinks] = useState<Record<string, string>>({});
+  const [shareLoading, setShareLoading] = useState(false);
+  const [shareLookupLoading, setShareLookupLoading] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+  const isLoginRoute = useMemo(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    return window.location.pathname === "/login";
+  }, []);
 
   const [theme, setTheme] = useTheme();
   const { toasts, pushToast } = useToasts();
@@ -533,6 +555,11 @@ export default function App() {
   const selectionCount = selectedEntries.length;
   const canWrite = userRole !== "read-only";
   const editTarget = selectionTargets.length === 1 ? selectionTargets[0] : null;
+  const selectedPath = useMemo(
+    () => (selected ? joinPath(path, selected.name) : null),
+    [path, selected]
+  );
+  const shareLink = selectedPath ? shareLinks[selectedPath] ?? null : null;
   const canEditTarget =
     !showTrash &&
     editTarget?.type === "file" &&
@@ -1096,6 +1123,76 @@ export default function App() {
     pushToast("Zip download started.", "info");
   }, [selectionTargets, notifyError, pushToast]);
 
+  const handleShareCreate = useCallback(async () => {
+    if (!selected || selected.type !== "file" || !selectedPath) {
+      notifyError("Select a file to share.");
+      return;
+    }
+    setShareLoading(true);
+    setShareError(null);
+
+    const response = await apiFetch("/share", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: selectedPath, force: Boolean(shareLink) }),
+    });
+
+    if (response.status === 401) {
+      setAuth("logged_out");
+      setShareLoading(false);
+      return;
+    }
+
+    if (!response.ok) {
+      const data = await readJson(response);
+      const message = data?.error ?? "Failed to create share link.";
+      setShareError(message);
+      notifyError(message);
+      setShareLoading(false);
+      return;
+    }
+
+    const data = (await response.json()) as { token?: string };
+    if (!data?.token) {
+      const message = "Share link unavailable.";
+      setShareError(message);
+      notifyError(message);
+      setShareLoading(false);
+      return;
+    }
+
+    const origin = typeof window === "undefined" ? "" : window.location.origin;
+    setShareLinks((prev) => ({
+      ...prev,
+      [selectedPath]: `${origin}/share/${data.token}`,
+    }));
+    setShareLoading(false);
+    pushToast("Share link ready.", "success");
+  }, [selected, selectedPath, shareLink, notifyError, pushToast, setAuth]);
+
+  const handleShareCopy = useCallback(async () => {
+    if (!shareLink) {
+      return;
+    }
+    if (!navigator.clipboard) {
+      window.prompt("Share link", shareLink);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(shareLink);
+      pushToast("Share link copied.", "success");
+    } catch {
+      notifyError("Unable to copy share link.");
+    }
+  }, [shareLink, notifyError, pushToast]);
+
+  const handleShareOpen = useCallback(() => {
+    if (!shareLink) {
+      return;
+    }
+    window.open(shareLink, "_blank", "noopener,noreferrer");
+  }, [shareLink]);
+
   const handleRestore = useCallback(
     async (item: TrashItem) => {
       if (!requireWrite()) {
@@ -1200,37 +1297,44 @@ export default function App() {
     setDateFilter("any");
     setQuery("");
     void loadPath("/");
+    setSidebarOpen(false);
   }, [exitTrashView, loadPath]);
 
   const handleSidebarRecent = useCallback(() => {
     exitTrashView();
     setTypeFilter("all");
     setDateFilter("7d");
+    setSidebarOpen(false);
   }, [exitTrashView]);
 
   const handleSidebarDocs = useCallback(() => {
     exitTrashView();
     setTypeFilter("document");
+    setSidebarOpen(false);
   }, [exitTrashView]);
 
   const handleSidebarPhotos = useCallback(() => {
     exitTrashView();
     setTypeFilter("image");
+    setSidebarOpen(false);
   }, [exitTrashView]);
 
   const handleSidebarAudio = useCallback(() => {
     exitTrashView();
     setTypeFilter("audio");
+    setSidebarOpen(false);
   }, [exitTrashView]);
 
   const handleSidebarVideo = useCallback(() => {
     exitTrashView();
     setTypeFilter("video");
+    setSidebarOpen(false);
   }, [exitTrashView]);
 
   const handleSidebarArchive = useCallback(() => {
     exitTrashView();
     setTypeFilter("archive");
+    setSidebarOpen(false);
   }, [exitTrashView]);
 
   const canTextPreview = useMemo(() => {
@@ -1344,7 +1448,59 @@ export default function App() {
   const storageFallback = storageStats ?? storageStatsRef.current;
   const storageTotalBytes = storageFallback?.totalBytes ?? storageOverview.totalBytes;
   const storageTotalFiles = storageFallback?.totalFiles ?? storageOverview.totalFiles;
-  const showDetailPanel = Boolean(selected && selected.type === "file" && !showTrash);
+  const showDetailPanel = Boolean(selected && selected.type === "file" && !showTrash && !isMobile);
+  const shareStatus = shareLoading
+    ? "creating"
+    : shareLookupLoading
+      ? "checking"
+      : shareError
+        ? "error"
+        : shareLink
+          ? "ready"
+          : "idle";
+
+  useEffect(() => {
+    setShareError(null);
+    setShareLoading(false);
+    setShareLookupLoading(false);
+  }, [selectedPath]);
+
+  useEffect(() => {
+    if (!selectedPath || shareToken || shareLinks[selectedPath]) {
+      return;
+    }
+    let active = true;
+    const fetchExistingShare = async () => {
+      setShareLookupLoading(true);
+      setShareError(null);
+      const response = await apiFetch(`/share?path=${encodeURIComponent(selectedPath)}`);
+      if (response.status === 401) {
+        setAuth("logged_out");
+        return;
+      }
+      if (!response.ok) {
+        if (active) {
+          setShareLookupLoading(false);
+        }
+        return;
+      }
+      const data = (await response.json()) as { token?: string | null };
+      if (active) {
+        if (data?.token) {
+          const origin = typeof window === "undefined" ? "" : window.location.origin;
+          setShareLinks((prev) => ({
+            ...prev,
+            [selectedPath]: `${origin}/share/${data.token}`,
+          }));
+        }
+        setShareLookupLoading(false);
+      }
+    };
+    void fetchExistingShare();
+    return () => {
+      active = false;
+    };
+  }, [selectedPath, shareToken, shareLinks, setAuth]);
 
   useEffect(() => {
     const hasData =
@@ -1521,6 +1677,31 @@ export default function App() {
     setPage(1);
   }, [path, showTrash]);
 
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) {
+      return;
+    }
+    const media = window.matchMedia("(max-width: 900px)");
+    const update = () => setIsMobile(media.matches);
+    update();
+    if (typeof media.addEventListener === "function") {
+      media.addEventListener("change", update);
+    } else {
+      media.addListener(update);
+    }
+    return () => {
+      if (typeof media.removeEventListener === "function") {
+        media.removeEventListener("change", update);
+      } else {
+        media.removeListener(update);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [path, showTrash]);
+
   const breadcrumbs = useMemo<Breadcrumb[]>(() => {
     if (path === "/") {
       return [{ label: "Home", path: "/" }];
@@ -1546,7 +1727,7 @@ export default function App() {
     contentSearch;
 
   useKeyboardShortcuts({
-    enabled: SHORTCUTS_ENABLED,
+    enabled: SHORTCUTS_ENABLED && !shareToken,
     showTrash,
     selectionTargets,
     handlers: {
@@ -1565,6 +1746,9 @@ export default function App() {
   });
 
   useEffect(() => {
+    if (shareToken) {
+      return;
+    }
     if (auth === "unknown") {
       const initialPath = getStoredPath() ?? "/";
       const loadInitialPath = async () => {
@@ -1576,10 +1760,10 @@ export default function App() {
       };
       void loadInitialPath();
     }
-  }, [auth, loadPath]);
+  }, [auth, loadPath, shareToken]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    if (shareToken || typeof window === "undefined") {
       return;
     }
     const params = new URLSearchParams(window.location.search);
@@ -1587,27 +1771,36 @@ export default function App() {
     if (editPath) {
       setPendingEditorPath(editPath);
     }
-  }, []);
+  }, [shareToken]);
 
   useEffect(() => {
+    if (shareToken) {
+      return;
+    }
     if (auth !== "authed" || !pendingEditorPath) {
       return;
     }
     void openEditorByPath(pendingEditorPath);
     setPendingEditorPath(null);
-  }, [auth, pendingEditorPath, openEditorByPath]);
+  }, [auth, pendingEditorPath, openEditorByPath, shareToken]);
 
   useEffect(() => {
+    if (shareToken) {
+      return;
+    }
     if (auth === "logged_out") {
       resetEditorState();
     }
-  }, [auth, resetEditorState]);
+  }, [auth, resetEditorState, shareToken]);
 
   useEffect(() => {
     setStoredViewMode(viewMode);
   }, [viewMode]);
 
   useEffect(() => {
+    if (shareToken) {
+      return;
+    }
     if (auth !== "authed") {
       return;
     }
@@ -1631,7 +1824,11 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [auth]);
+  }, [auth, shareToken]);
+
+  if (shareToken) {
+    return <SharedFileView token={shareToken} />;
+  }
 
   return (
     <div
@@ -1688,30 +1885,13 @@ export default function App() {
         onError={handleImageError}
       />
       <TextPreviewModal preview={preview} open={textPreviewOpen} onClose={closeTextPreview} />
-      <div className="shell">
+      <div
+        className={
+          auth === "logged_out" ? (isLoginRoute ? "login-shell" : "landing-shell-wrap") : "shell"
+        }
+      >
         {auth === "logged_out" ? (
-          <>
-            <Header
-              auth={auth}
-              username={username}
-              userRole={userRole}
-              theme={theme}
-              showTrash={showTrash}
-              filtersOpen={filtersOpen}
-              filtersActive={filtersActive}
-              typeFilter={typeFilter}
-              sizeMinMb={sizeMinMb}
-              sizeMaxMb={sizeMaxMb}
-              dateFilter={dateFilter}
-              onThemeChange={setTheme}
-              onLogout={handleLogout}
-              onToggleFilters={() => setFiltersOpen((prev) => !prev)}
-              onTypeFilterChange={setTypeFilter}
-              onSizeMinChange={setSizeMinMb}
-              onSizeMaxChange={setSizeMaxMb}
-              onDateFilterChange={setDateFilter}
-              onClearFilters={handleClearFilters}
-            />
+          isLoginRoute ? (
             <LoginForm
               loginUsername={loginUsername}
               password={password}
@@ -1720,9 +1900,15 @@ export default function App() {
               onPasswordChange={setPassword}
               onSubmit={handleLogin}
             />
-          </>
+          ) : (
+            <LandingPage />
+          )
         ) : (
-          <div className={`workspace${showDetailPanel ? " has-detail" : ""}`}>
+          <div
+            className={`workspace${showDetailPanel ? " has-detail" : ""}${
+              sidebarOpen ? " sidebar-open" : ""
+            }`}
+          >
             <aside className="sidebar">
               {/* <div className="sidebar-card">
                 <div className="workspace-pill">
@@ -1875,34 +2061,15 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="sidebar-footer">
-                <div className="storage-summary">
-                  <div className="storage-header">
-                    <div>
-                      <p className="storage-used">{formatBytes(storageTotalBytes)}</p>
-                      <p className="storage-subtitle">Used</p>
-                    </div>
-                    <div className="storage-capacity">
-                      <p>1024 GB</p>
-                      <button type="button" className="storage-upgrade">
-                        Upgrade
-                      </button>
-                    </div>
-                  </div>
-                  <div className="storage-bar">
-                    <div
-                      className="storage-bar-fill"
-                      style={{
-                        width: `${Math.min(
-                          100,
-                          (storageTotalBytes / (1024 * 1024 ** 3)) * 100
-                        ).toFixed(1)}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              </div>
             </aside>
+            {sidebarOpen ? (
+              <button
+                type="button"
+                className="sidebar-overlay"
+                onClick={() => setSidebarOpen(false)}
+                aria-label="Close menu"
+              />
+            ) : null}
 
             <main className="main">
 
@@ -1938,6 +2105,7 @@ export default function App() {
                   onArchiveClick={handleArchiveClick}
                   onDelete={handleDelete}
                   onClearSelection={handleClearSelection}
+                  onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
                 />
                 <div className="breadcrumbs-bar">
                   <div className="breadcrumbs">
@@ -2004,6 +2172,14 @@ export default function App() {
                   canTextPreview={canTextPreview}
                   canImagePreview={canImagePreview}
                   error={error}
+                  share={{
+                    status: shareStatus,
+                    url: shareLink,
+                    error: shareError,
+                  }}
+                  onShareCreate={handleShareCreate}
+                  onShareCopy={handleShareCopy}
+                  onShareOpen={handleShareOpen}
                   onClose={() => setSelected(null)}
                 />
               </aside>

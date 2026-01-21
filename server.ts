@@ -51,6 +51,12 @@ type SessionContext = SessionPayload & {
   rootReal: string;
 };
 type AppContext = Parameters<typeof setCookie>[0];
+type ShareRecord = {
+  token: string;
+  path: string;
+  rootReal: string;
+  createdAt: number;
+};
 
 const ROOT = (process.env.FILE_ROOT ?? "").trim() || process.cwd();
 const ROOT_REAL = await fs.realpath(ROOT);
@@ -81,13 +87,15 @@ const ARCHIVE_LARGE_BYTES =
     : 100 * 1024 * 1024;
 const UPLOAD_TMP_DIR = path.join(os.tmpdir(), "bro-fm-uploads");
 const AUDIT_LOG_PATH = process.env.AUDIT_LOG_PATH?.trim() ?? path.join(process.cwd(), "audit.log");
+const SHARE_STORE_PATH =
+  process.env.SHARE_STORE_PATH?.trim() ?? path.join(process.cwd(), "share-links.json");
 const SESSION_COOKIE_BASE_OPTIONS = {
   httpOnly: true,
   sameSite: "Strict",
   maxAge: Math.floor(SESSION_TTL_MS / 1000),
   path: "/",
 } as const;
-const TEXT_PREVIEW_EXTS = new Set([".txt", ".php", ".js", ".html"]);
+const TEXT_PREVIEW_EXTS = new Set([".txt", ".php", ".js", ".html", ".csv"]);
 const TEXT_EDIT_EXTS = new Set([
   ".txt",
   ".php",
@@ -126,6 +134,8 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
   ".bmp": "image/bmp",
   ".svg": "image/svg+xml",
 };
+const SHARE_MAP = new Map<string, ShareRecord>();
+await loadShareStore();
 
 if (STORAGE_MODE === "s3" && !S3_BUCKET) {
   throw new Error("S3_BUCKET is required when STORAGE_MODE is set to s3.");
@@ -147,13 +157,20 @@ const app = new Hono<{ Variables: { session: SessionContext } }>();
 
 app.use("*", async (c, next) => {
   c.header("X-Content-Type-Options", "nosniff");
-  c.header("X-Frame-Options", "DENY");
+  if (c.req.path.startsWith("/api/share/") && c.req.path.endsWith("/file")) {
+    c.header("X-Frame-Options", "SAMEORIGIN");
+  } else {
+    c.header("X-Frame-Options", "DENY");
+  }
   c.header("Referrer-Policy", "no-referrer");
   await next();
 });
 
 app.use("/api/*", async (c, next) => {
   if (c.req.path === "/api/login") {
+    return next();
+  }
+  if (c.req.method === "GET" && c.req.path.startsWith("/api/share/")) {
     return next();
   }
 
@@ -620,6 +637,429 @@ app.get("/api/download", async (c) => {
   c.header("Content-Disposition", formatContentDisposition("attachment", filename));
 
   await auditLog(c, "download", { path: resolved.normalized, username: session.user });
+
+  return c.body(file);
+});
+
+app.post("/api/share", async (c) => {
+  const session = c.get("session");
+  const body = await readJsonBody<{ path?: string; force?: boolean }>(c);
+  if (!body?.path) {
+    return c.json({ error: "Path is required." }, 400);
+  }
+  const force = Boolean(body.force);
+
+  if (STORAGE_MODE === "s3") {
+    let resolved;
+    try {
+      resolved = resolveSafeS3Path(body.path, session.rootReal);
+    } catch {
+      return c.json({ error: "Path not found." }, 404);
+    }
+
+    const info = await getS3PathInfo(session.rootReal, resolved.normalized);
+    if (info.type === "none") {
+      return c.json({ error: "Path not found." }, 404);
+    }
+    if (info.type !== "file") {
+      return c.json({ error: "Path is not a file." }, 400);
+    }
+
+    if (!force) {
+      const existing = await findShareForPath(resolved.normalized, session.rootReal);
+      if (existing) {
+        return c.json({ token: existing.token });
+      }
+    } else {
+      await removeSharesForPath(resolved.normalized, session.rootReal);
+    }
+
+    const token = randomUUID();
+    await storeShare({
+      token,
+      path: resolved.normalized,
+      rootReal: session.rootReal,
+      createdAt: Date.now(),
+    });
+
+    await auditLog(c, "share_create", {
+      path: resolved.normalized,
+      username: session.user,
+      storage: "s3",
+    });
+
+    return c.json({ token });
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveSafePath(body.path, session.rootReal);
+  } catch {
+    return c.json({ error: "Path not found." }, 404);
+  }
+
+  const stats = await fs.stat(resolved.fullPath);
+  if (!stats.isFile()) {
+    return c.json({ error: "Path is not a file." }, 400);
+  }
+
+  if (!force) {
+    const existing = await findShareForPath(resolved.normalized, session.rootReal);
+    if (existing) {
+      return c.json({ token: existing.token });
+    }
+  } else {
+    await removeSharesForPath(resolved.normalized, session.rootReal);
+  }
+
+  const token = randomUUID();
+  await storeShare({
+    token,
+    path: resolved.normalized,
+    rootReal: session.rootReal,
+    createdAt: Date.now(),
+  });
+
+  await auditLog(c, "share_create", {
+    path: resolved.normalized,
+    username: session.user,
+    storage: "local",
+  });
+
+  return c.json({ token });
+});
+
+app.get("/api/share", async (c) => {
+  const session = c.get("session");
+  const requestPath = c.req.query("path");
+  if (!requestPath) {
+    return c.json({ error: "Path is required." }, 400);
+  }
+
+  if (STORAGE_MODE === "s3") {
+    let resolved;
+    try {
+      resolved = resolveSafeS3Path(requestPath, session.rootReal);
+    } catch {
+      return c.json({ error: "Path not found." }, 404);
+    }
+
+    const info = await getS3PathInfo(session.rootReal, resolved.normalized);
+    if (info.type !== "file") {
+      return c.json({ error: "Path not found." }, 404);
+    }
+
+    const existing = await findShareForPath(resolved.normalized, session.rootReal);
+    return c.json({ token: existing?.token ?? null });
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveSafePath(requestPath, session.rootReal);
+  } catch {
+    return c.json({ error: "Path not found." }, 404);
+  }
+
+  const stats = await fs.stat(resolved.fullPath);
+  if (!stats.isFile()) {
+    return c.json({ error: "Path not found." }, 404);
+  }
+
+  const existing = await findShareForPath(resolved.normalized, session.rootReal);
+  return c.json({ token: existing?.token ?? null });
+});
+
+app.get("/api/share/:token", async (c) => {
+  const token = c.req.param("token");
+  const record = getShareRecord(token);
+  if (!record) {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  if (STORAGE_MODE === "s3") {
+    let resolved;
+    try {
+      resolved = resolveSafeS3Path(record.path, record.rootReal);
+    } catch {
+      return c.json({ error: "Share not found." }, 404);
+    }
+
+    const info = await getS3PathInfo(record.rootReal, resolved.normalized);
+    if (info.type !== "file") {
+      return c.json({ error: "Share not found." }, 404);
+    }
+
+    await auditLog(c, "share_view", { path: resolved.normalized, token, storage: "s3" });
+
+    return c.json({
+      token,
+      name: path.posix.basename(resolved.normalized),
+      size: info.size,
+      mtime: info.mtime,
+      canTextPreview: isTextPreviewable(resolved.normalized),
+      canImagePreview: isImagePreviewable(resolved.normalized),
+    });
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveSafePath(record.path, record.rootReal);
+  } catch {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  const stats = await fs.stat(resolved.fullPath);
+  if (!stats.isFile()) {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  await auditLog(c, "share_view", { path: resolved.normalized, token, storage: "local" });
+
+  return c.json({
+    token,
+    name: path.basename(resolved.fullPath),
+    size: stats.size,
+    mtime: stats.mtimeMs,
+    canTextPreview: isTextPreviewable(resolved.fullPath),
+    canImagePreview: isImagePreviewable(resolved.fullPath),
+  });
+});
+
+app.get("/api/share/:token/download", async (c) => {
+  const token = c.req.param("token");
+  const record = getShareRecord(token);
+  if (!record) {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  if (STORAGE_MODE === "s3") {
+    let resolved;
+    try {
+      resolved = resolveSafeS3Path(record.path, record.rootReal);
+    } catch {
+      return c.json({ error: "Share not found." }, 404);
+    }
+
+    const info = await getS3PathInfo(record.rootReal, resolved.normalized);
+    if (info.type !== "file") {
+      return c.json({ error: "Share not found." }, 404);
+    }
+
+    const key = toS3Key(record.rootReal, resolved.normalized);
+    const object = await s3GetObject(key);
+    const filename = path.posix.basename(resolved.normalized);
+    c.header("Content-Type", object.ContentType || "application/octet-stream");
+    c.header("Content-Disposition", formatContentDisposition("attachment", filename));
+
+    await auditLog(c, "share_download", { path: resolved.normalized, token, storage: "s3" });
+
+    return c.body(object.Body as BodyInit);
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveSafePath(record.path, record.rootReal);
+  } catch {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  const stats = await fs.stat(resolved.fullPath);
+  if (!stats.isFile()) {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  const file = Bun.file(resolved.fullPath);
+  const filename = path.basename(resolved.fullPath);
+  c.header("Content-Type", file.type || "application/octet-stream");
+  c.header("Content-Disposition", formatContentDisposition("attachment", filename));
+
+  await auditLog(c, "share_download", { path: resolved.normalized, token, storage: "local" });
+
+  return c.body(file);
+});
+
+app.get("/api/share/:token/file", async (c) => {
+  const token = c.req.param("token");
+  const record = getShareRecord(token);
+  if (!record) {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  if (STORAGE_MODE === "s3") {
+    let resolved;
+    try {
+      resolved = resolveSafeS3Path(record.path, record.rootReal);
+    } catch {
+      return c.json({ error: "Share not found." }, 404);
+    }
+
+    const info = await getS3PathInfo(record.rootReal, resolved.normalized);
+    if (info.type !== "file") {
+      return c.json({ error: "Share not found." }, 404);
+    }
+
+    const key = toS3Key(record.rootReal, resolved.normalized);
+    const object = await s3GetObject(key);
+    const filename = path.posix.basename(resolved.normalized);
+    c.header("Content-Type", object.ContentType || "application/octet-stream");
+    c.header("Content-Disposition", formatContentDisposition("inline", filename));
+
+    await auditLog(c, "share_file", { path: resolved.normalized, token, storage: "s3" });
+
+    return c.body(object.Body as BodyInit);
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveSafePath(record.path, record.rootReal);
+  } catch {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  const stats = await fs.stat(resolved.fullPath);
+  if (!stats.isFile()) {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  const file = Bun.file(resolved.fullPath);
+  const filename = path.basename(resolved.fullPath);
+  c.header("Content-Type", file.type || "application/octet-stream");
+  c.header("Content-Disposition", formatContentDisposition("inline", filename));
+
+  await auditLog(c, "share_file", { path: resolved.normalized, token, storage: "local" });
+
+  return c.body(file);
+});
+
+app.get("/api/share/:token/preview", async (c) => {
+  const token = c.req.param("token");
+  const record = getShareRecord(token);
+  if (!record) {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  if (STORAGE_MODE === "s3") {
+    let resolved;
+    try {
+      resolved = resolveSafeS3Path(record.path, record.rootReal);
+    } catch {
+      return c.json({ error: "Share not found." }, 404);
+    }
+
+    const info = await getS3PathInfo(record.rootReal, resolved.normalized);
+    if (info.type !== "file") {
+      return c.json({ error: "Share not found." }, 404);
+    }
+    if (!isTextPreviewable(resolved.normalized)) {
+      return c.json({ error: "Preview not available for this file type." }, 400);
+    }
+    if (info.size > MAX_PREVIEW_BYTES) {
+      return c.json({ error: "File is too large to preview." }, 413);
+    }
+
+    const key = toS3Key(record.rootReal, resolved.normalized);
+    const text = await s3ReadObjectText(key);
+
+    await auditLog(c, "share_preview", { path: resolved.normalized, token, storage: "s3" });
+
+    return c.json({
+      name: path.posix.basename(resolved.normalized),
+      size: info.size,
+      mtime: info.mtime,
+      content: text,
+    });
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveSafePath(record.path, record.rootReal);
+  } catch {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  const stats = await fs.stat(resolved.fullPath);
+  if (!stats.isFile()) {
+    return c.json({ error: "Share not found." }, 404);
+  }
+  if (!isTextPreviewable(resolved.fullPath)) {
+    return c.json({ error: "Preview not available for this file type." }, 400);
+  }
+  if (stats.size > MAX_PREVIEW_BYTES) {
+    return c.json({ error: "File is too large to preview." }, 413);
+  }
+
+  const file = Bun.file(resolved.fullPath);
+  const text = await file.text();
+
+  await auditLog(c, "share_preview", { path: resolved.normalized, token, storage: "local" });
+
+  return c.json({
+    name: path.basename(resolved.fullPath),
+    size: stats.size,
+    mtime: stats.mtimeMs,
+    content: text,
+  });
+});
+
+app.get("/api/share/:token/image", async (c) => {
+  const token = c.req.param("token");
+  const record = getShareRecord(token);
+  if (!record) {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  if (STORAGE_MODE === "s3") {
+    let resolved;
+    try {
+      resolved = resolveSafeS3Path(record.path, record.rootReal);
+    } catch {
+      return c.json({ error: "Share not found." }, 404);
+    }
+
+    const info = await getS3PathInfo(record.rootReal, resolved.normalized);
+    if (info.type !== "file") {
+      return c.json({ error: "Share not found." }, 404);
+    }
+    if (!isImagePreviewable(resolved.normalized)) {
+      return c.json({ error: "Image preview not available." }, 400);
+    }
+
+    const key = toS3Key(record.rootReal, resolved.normalized);
+    const object = await s3GetObject(key);
+    const ext = path.extname(resolved.normalized).toLowerCase();
+    const mime = object.ContentType || IMAGE_MIME_BY_EXT[ext] || "application/octet-stream";
+    const filename = path.posix.basename(resolved.normalized);
+    c.header("Content-Type", mime);
+    c.header("Content-Disposition", formatContentDisposition("inline", filename));
+
+    await auditLog(c, "share_image", { path: resolved.normalized, token, storage: "s3" });
+
+    return c.body(object.Body as BodyInit);
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveSafePath(record.path, record.rootReal);
+  } catch {
+    return c.json({ error: "Share not found." }, 404);
+  }
+
+  const stats = await fs.stat(resolved.fullPath);
+  if (!stats.isFile()) {
+    return c.json({ error: "Share not found." }, 404);
+  }
+  if (!isImagePreviewable(resolved.fullPath)) {
+    return c.json({ error: "Image preview not available." }, 400);
+  }
+
+  const file = Bun.file(resolved.fullPath);
+  const ext = path.extname(resolved.fullPath).toLowerCase();
+  const mime = file.type || IMAGE_MIME_BY_EXT[ext] || "application/octet-stream";
+  const filename = path.basename(resolved.fullPath);
+  c.header("Content-Type", mime);
+  c.header("Content-Disposition", formatContentDisposition("inline", filename));
+
+  await auditLog(c, "share_image", { path: resolved.normalized, token, storage: "local" });
 
   return c.body(file);
 });
@@ -1455,6 +1895,122 @@ async function auditLog(
   } catch (error) {
     console.error("Audit log failed:", error);
   }
+}
+
+async function loadShareStore() {
+  let raw: string;
+  try {
+    raw = await fs.readFile(SHARE_STORE_PATH, "utf8");
+  } catch {
+    return;
+  }
+
+  try {
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data)) {
+      return;
+    }
+    let deduped = false;
+    for (const item of data) {
+      if (
+        item &&
+        typeof item.token === "string" &&
+        typeof item.path === "string" &&
+        typeof item.rootReal === "string" &&
+        typeof item.createdAt === "number"
+      ) {
+        const record = {
+          token: item.token,
+          path: item.path,
+          rootReal: item.rootReal,
+          createdAt: item.createdAt,
+        };
+        SHARE_MAP.set(record.token, record);
+        if (!record.rootReal) {
+          deduped = true;
+        }
+      }
+    }
+    if (deduped) {
+      await saveShareStore();
+    }
+  } catch (error) {
+    console.error("Share store failed to load:", error);
+  }
+}
+
+async function saveShareStore() {
+  const deduped = new Map<string, ShareRecord>();
+  for (const record of SHARE_MAP.values()) {
+    const key = `${record.rootReal}::${record.path}`;
+    const existing = deduped.get(key);
+    if (!existing || record.createdAt > existing.createdAt) {
+      deduped.set(key, record);
+    }
+  }
+  const records = Array.from(deduped.values()).map((record) => ({
+    token: record.token,
+    path: record.path,
+    rootReal: record.rootReal,
+    createdAt: record.createdAt,
+  }));
+  try {
+    await fs.writeFile(SHARE_STORE_PATH, JSON.stringify(records, null, 2), "utf8");
+  } catch (error) {
+    console.error("Share store failed to save:", error);
+  }
+}
+
+async function storeShare(record: ShareRecord) {
+  SHARE_MAP.set(record.token, record);
+  await saveShareStore();
+}
+
+async function findShareForPath(targetPath: string, rootReal: string) {
+  let match: ShareRecord | null = null;
+  let needsSave = false;
+  for (const record of SHARE_MAP.values()) {
+    if (record.path !== targetPath) {
+      continue;
+    }
+    if (record.rootReal && record.rootReal !== rootReal) {
+      continue;
+    }
+    if (!record.rootReal) {
+      record.rootReal = rootReal;
+      SHARE_MAP.set(record.token, record);
+      needsSave = true;
+    }
+    if (record.rootReal === rootReal) {
+      if (!match || record.createdAt > match.createdAt) {
+        match = record;
+      }
+    }
+  }
+  if (needsSave) {
+    await saveShareStore();
+  }
+  return match;
+}
+
+async function removeSharesForPath(targetPath: string, rootReal: string) {
+  let removed = false;
+  for (const [token, record] of SHARE_MAP.entries()) {
+    if (
+      record.path === targetPath &&
+      (!record.rootReal || record.rootReal === rootReal)
+    ) {
+      SHARE_MAP.delete(token);
+      removed = true;
+    }
+  }
+  if (removed) {
+    await saveShareStore();
+  }
+}
+
+function getShareRecord(token: string) {
+  return SHARE_MAP.get(token) ?? null;
 }
 
 type TrashRecord = {

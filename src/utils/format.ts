@@ -16,6 +16,12 @@ export function formatBytes(bytes: number) {
 }
 
 export function formatDate(timestamp: number) {
+  if(!timestamp) {
+    return '-';
+  }
   const date = new Date(timestamp);
-  return date.toLocaleString();
+  return date.toLocaleString('id-ID', {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  });
 }
